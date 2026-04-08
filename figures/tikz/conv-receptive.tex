@@ -1,0 +1,36 @@
+% conv-receptive.tex — рост receptive field после двух Conv 3x3.
+\documentclass[tikz,border=4pt]{standalone}
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=5mm, y=5mm]
+  % Три feature map слоя L0, L1, L2 (5x5 → 3x3 → 1x1 центрированно)
+  \def\drawmap#1#2#3{ % shift, size, label
+    \begin{scope}[shift={#1}]
+      \foreach \i in {0,...,#2} {
+        \foreach \j in {0,...,#2} {
+          \draw[ml3/tensor, fill=ml3soft] (\i, -\j) rectangle ++(1,-1);
+        }
+      }
+      \node[font=\footnotesize\color{ml3muted}, anchor=north]
+        at ($({#2/2 + 0.5}, -{#2 + 1.4})$) {#3};
+    \end{scope}
+  }
+
+  \drawmap{(0,0)}{4}{$L_0$ (input, $5\times5$)}
+  \drawmap{(9,-0.5)}{2}{$L_1 = \text{Conv}_{3\times3}(L_0)$}
+  \drawmap{(16,-1.5)}{0}{$L_2 = \text{Conv}_{3\times3}(L_1)$}
+
+  % Подсветка receptive field на L0 для центрального пикселя L2 (5x5)
+  \begin{scope}
+    \draw[draw=ml3accent, line width=1pt, fill=ml3accent!18]
+      (0,0) rectangle (5,-5);
+  \end{scope}
+
+  % Стрелки + подпись
+  \draw[ml3/arrow, draw=ml3accent]
+    (5.2,-2.5) -- node[above, font=\footnotesize\color{ml3accent}] {RF $5{\times}5$} (8.8,-2.5);
+  \draw[ml3/arrow, draw=ml3accent]
+    (12.2,-2.5) -- (15.8,-2.5);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,34 @@
+% residual.tex — residual-блок ResNet (используется в lectures/04-cnn).
+\documentclass[tikz,border=4pt]{standalone}
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance = 6mm and 12mm,
+  every node/.append style = {font=\small}
+]
+  \node[ml3/tensor] (x) {$x$};
+  \node[ml3/box, right=of x] (conv1) {Conv $3{\times}3$};
+  \node[ml3/box, right=of conv1] (bn1) {BN};
+  \node[ml3/box, right=of bn1] (relu) {ReLU};
+  \node[ml3/box, right=of relu] (conv2) {Conv $3{\times}3$};
+  \node[ml3/box, right=of conv2] (bn2) {BN};
+  \node[ml3/op, right=of bn2] (plus) {$+$};
+  \node[ml3/box, right=of plus] (relu2) {ReLU};
+  \node[ml3/tensor, right=of relu2] (y) {$y$};
+
+  \draw[ml3/arrow] (x) -- (conv1);
+  \draw[ml3/arrow] (conv1) -- (bn1);
+  \draw[ml3/arrow] (bn1) -- (relu);
+  \draw[ml3/arrow] (relu) -- (conv2);
+  \draw[ml3/arrow] (conv2) -- (bn2);
+  \draw[ml3/arrow] (bn2) -- (plus);
+  \draw[ml3/arrow] (plus) -- (relu2);
+  \draw[ml3/arrow] (relu2) -- (y);
+
+  % Skip connection
+  \draw[ml3/arrow, draw=ml3accent, line width=0.9pt]
+    (x) ..  controls +(0,12mm) and +(0,12mm) .. (plus)
+    node[midway, above, font=\footnotesize\color{ml3accent}] {identity (skip)};
+\end{tikzpicture}
+\end{document}

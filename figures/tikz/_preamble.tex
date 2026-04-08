@@ -1,0 +1,54 @@
+% Общая преамбула для всех TikZ-фигур курса ml3-neo.
+% Подключается:
+%   - render.py при компиляции через Tectonic в standalone SVG/PDF;
+%   - Quarto _quarto.yml через header-includes для PDF-сборки лекций;
+%   - лекциями вручную через \input{figures/tikz/_preamble.tex}.
+%
+% Все цвета определены через xcolor чтобы хорошо смотреться и в light, и в dark теме.
+
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{amsmath, amssymb}
+\usepackage{bm}
+
+\usetikzlibrary{
+  positioning,
+  arrows.meta,
+  calc,
+  fit,
+  shapes.geometric,
+  shapes.misc,
+  backgrounds,
+  decorations.pathreplacing,
+  decorations.pathmorphing,
+  patterns,
+  matrix,
+  3d
+}
+
+% --- Цветовая палитра курса ----------------------------------------------
+% Совместима с акцентом сайта (#4f46e5) и нейтральная по отношению к темам.
+\definecolor{ml3accent}{HTML}{4F46E5}
+\definecolor{ml3accent2}{HTML}{0EA5E9}
+\definecolor{ml3warm}{HTML}{F59E0B}
+\definecolor{ml3rose}{HTML}{E11D48}
+\definecolor{ml3green}{HTML}{10B981}
+\definecolor{ml3muted}{HTML}{6B7280}
+\definecolor{ml3soft}{HTML}{E5E7EB}
+\definecolor{ml3ink}{HTML}{111827}
+
+% --- Общие стили nodes/arrows --------------------------------------------
+\tikzset{
+  >={Stealth[round]},
+  ml3/box/.style    = {draw=ml3ink, line width=0.7pt, rounded corners=2pt,
+                       fill=ml3soft, minimum size=10mm, font=\small},
+  ml3/ghost/.style  = {draw=ml3muted, dashed, rounded corners=2pt,
+                       inner sep=4pt, font=\footnotesize\itshape\color{ml3muted}},
+  ml3/op/.style     = {draw=ml3accent, fill=white, line width=0.8pt,
+                       circle, minimum size=6mm, inner sep=0pt, font=\small},
+  ml3/tensor/.style = {draw=ml3accent2, line width=0.6pt, fill=ml3accent2!12,
+                       rounded corners=1pt, minimum height=8mm, font=\footnotesize},
+  ml3/arrow/.style  = {->, line width=0.7pt, draw=ml3ink},
+  ml3/dashedarrow/.style = {->, line width=0.6pt, draw=ml3muted, dashed},
+  ml3/label/.style  = {font=\footnotesize\color{ml3muted}}
+}

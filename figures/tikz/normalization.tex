@@ -1,0 +1,107 @@
+% normalization.tex — BN / LN / IN / GN / RMSNorm side-by-side.
+% Используется в lectures/03-mlp-norm и lectures/04-cnn (как припоминание).
+% Идея визуализации: тензор [N, C, H*W] изображён как сетка кубиков; цветом
+% выделена область, по которой считаются среднее и дисперсия.
+%
+% Скомпилировать: python figures/render.py figures/tikz/normalization.tex
+% Подключить в .qmd: ![](../figures/tikz/_build/normalization.svg)
+
+\documentclass[tikz,border=4pt]{standalone}
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[
+  cube/.style={draw=ml3ink, line width=0.35pt, fill=ml3soft},
+  hl/.style={draw=ml3ink, line width=0.4pt, fill=ml3accent!55},
+  panel title/.style={font=\small\bfseries\color{ml3ink}, anchor=north},
+  panel sub/.style={font=\scriptsize\color{ml3muted}, anchor=north},
+  x=4mm, y=4mm
+]
+
+% --- Параметры тензора (визуально маленькие, иначе фигура огромная) --------
+\def\Nsamples{4}    % batch
+\def\Cchans{6}      % channels
+\def\Spatial{4}     % H*W flattened
+\def\panelW{38mm}
+\def\panelGap{2mm}
+
+% --- Макрос: одна "панель" с типом нормализации --------------------------
+% #1 — anchor/coordinate
+% #2 — заголовок (BatchNorm и т.п.)
+% #3 — формула области (по чему усредняем)
+% #4 — тип подсветки: "bn", "ln", "in", "gn", "rms"
+\newcommand{\normpanel}[4]{
+  \begin{scope}[shift={#1}]
+    % фоновая рамка
+    \node[draw=ml3muted, dashed, rounded corners=2pt, inner sep=2mm,
+          minimum width=\panelW, minimum height=30mm, anchor=north west] (frame) at (0,0) {};
+
+    % тензор: N строк × C столбцов × Spatial кубиков
+    \foreach \n in {1,...,\Nsamples} {
+      \foreach \c in {1,...,\Cchans} {
+        \foreach \s in {1,...,\Spatial} {
+          \pgfmathsetmacro\px{(\c-1)*1.0 + (\s-1)*0.18 + 1}
+          \pgfmathsetmacro\py{-(\n-1)*1.0 - (\s-1)*0.18 - 4}
+
+          % решаем подсветку
+          \def\highlight{0}
+          \ifnum\pdfstrcmp{#4}{bn}=0
+            \ifnum\c=2 \def\highlight{1}\fi
+          \fi
+          \ifnum\pdfstrcmp{#4}{ln}=0
+            \ifnum\n=2 \def\highlight{1}\fi
+          \fi
+          \ifnum\pdfstrcmp{#4}{in}=0
+            \ifnum\n=2 \ifnum\c=2 \def\highlight{1}\fi\fi
+          \fi
+          \ifnum\pdfstrcmp{#4}{gn}=0
+            \ifnum\n=2
+              \ifnum\c<5
+                \ifnum\c>1 \def\highlight{1}\fi
+              \fi
+            \fi
+          \fi
+          \ifnum\pdfstrcmp{#4}{rms}=0
+            \ifnum\n=2 \def\highlight{1}\fi
+          \fi
+
+          \ifnum\highlight=1
+            \draw[hl] (\px, \py) rectangle ++(0.85, 0.85);
+          \else
+            \draw[cube] (\px, \py) rectangle ++(0.85, 0.85);
+          \fi
+        }
+      }
+    }
+
+    % оси
+    \node[ml3/label, anchor=east] at (0.6, -1.5) {$N$};
+    \node[ml3/label, anchor=south] at (4.0, 0.2) {$C$};
+    \node[ml3/label, anchor=west] at (8.2, -0.6) {$H{\cdot}W$};
+
+    % заголовок и подформула
+    \node[panel title] at ($(frame.north) + (0, -1mm)$) {#2};
+    \node[panel sub]   at ($(frame.north) + (0, -5mm)$) {#3};
+  \end{scope}
+}
+
+% --- Размещение пяти панелей -----------------------------------------------
+\normpanel{(0,0)}{BatchNorm}{$\mu_c, \sigma_c$ — по $N{\times}H{\times}W$}{bn}
+\normpanel{(45mm,0)}{LayerNorm}{$\mu_n, \sigma_n$ — по $C{\times}H{\times}W$}{ln}
+\normpanel{(90mm,0)}{InstanceNorm}{$\mu_{n,c}, \sigma_{n,c}$ — по $H{\times}W$}{in}
+\normpanel{(0,-38mm)}{GroupNorm}{$\mu_{n,g}, \sigma_{n,g}$ — по группе $G$}{gn}
+\normpanel{(45mm,-38mm)}{RMSNorm}{нет $\mu$; только $\mathrm{RMS}_n$}{rms}
+
+% --- Легенда формулы -------------------------------------------------------
+\node[anchor=north west, font=\footnotesize, text width=42mm,
+      inner sep=2mm, draw=ml3muted, rounded corners=2pt]
+  at (90mm,-38mm)
+{
+  \textbf{Общая форма:}\\[2pt]
+  $\hat x = \dfrac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}$\\[3pt]
+  $y = \gamma \hat x + \beta$\\[4pt]
+  Различие — \textit{по какой оси} считаем $\mu$ и $\sigma^2$. Подсвечена область усреднения для одного элемента батча.
+};
+
+\end{tikzpicture}
+\end{document}
