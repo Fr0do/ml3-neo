@@ -1,0 +1,50 @@
+# Quarto
+/_site/
+/.quarto/
+/_freeze/
+/.jupyter_cache/
+*.tex.aux
+*.tex.log
+lectures/**/lecture.log
+lectures/**/lecture.tex
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pixi/
+*.egg-info/
+.pytest_cache/
+
+# Marimo
+__marimo__/
+
+# TikZ build cache
+figures/tikz/_build/
+
+# Hidden test data — instructor only
+data/hidden/
+homework/*/data/hidden/
+
+# Grader state and submissions cache
+grader/state/*.lock
+grader/state/instances/
+grader/state/leaderboards.json
+grader/.cache/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Models / experiments
+*.ckpt
+*.pt
+*.safetensors
+wandb/
+lightning_logs/
+
+**/*.quarto_ipynb

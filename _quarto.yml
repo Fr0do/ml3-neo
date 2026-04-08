@@ -1,0 +1,107 @@
+project:
+  type: website
+  output-dir: _site
+  preview:
+    port: 4848
+    browser: false
+  render:
+    - "index.qmd"
+    - "syllabus.qmd"
+    - "how-to-study.qmd"
+    - "leaderboards.qmd"
+    - "lectures/**/*.qmd"
+    - "homework/**/README.qmd"
+    - "!lectures/_template/**"
+    - "!homework/_template/**"
+  resources:
+    - figures/tikz/_build/**/*.svg
+
+website:
+  title: "ML3 Neo"
+  description: "Курс машинного обучения для магистратур по data science"
+  site-url: https://ml3-neo.example.org
+  repo-url: https://github.com/example/ml3-neo
+  repo-actions: [edit, source, issue]
+  page-navigation: true
+  search:
+    location: navbar
+    type: overlay
+  navbar:
+    background: dark
+    pinned: true
+    left:
+      - href: index.qmd
+        text: Главная
+      - href: syllabus.qmd
+        text: Программа
+      - href: how-to-study.qmd
+        text: Как учиться
+      - text: Лекции
+        menu:
+          - lectures/04-cnn/lecture.qmd
+      - text: Семинары
+        menu:
+          - text: "04 — CNN (basic)"
+            href: seminars/04-cnn/basic.html
+          - text: "04 — CNN (advanced)"
+            href: seminars/04-cnn/advanced.html
+      - text: Домашки
+        menu:
+          - homework/04-cnn-zoo/README.qmd
+      - href: leaderboards.qmd
+        text: Leaderboards
+    right:
+      - icon: github
+        href: https://github.com/example/ml3-neo
+        aria-label: GitHub
+  sidebar:
+    - id: course
+      title: "Содержание"
+      style: docked
+      collapse-level: 2
+      contents:
+        - section: "Core"
+          contents:
+            - lectures/04-cnn/lecture.qmd
+        - section: "Tracks"
+          contents: []
+  page-footer:
+    left: "© 2026 ml3-neo · CC-BY-SA"
+    right: "Сделано с Quarto + Marimo"
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    code-fold: false
+    code-tools: true
+    code-copy: true
+    code-link: true
+    highlight-style: github
+    fig-align: center
+    fig-format: svg
+    smooth-scroll: true
+    link-external-icon: true
+    link-external-newwindow: true
+    html-math-method: katex
+    css: theme.css
+    include-in-header:
+      - text: |
+          <link rel="preconnect" href="https://cdn.jsdelivr.net">
+# PDF-сборка лекций — опциональная, не через Quarto-сайт.
+# Отдельные .tex + Tectonic живут в figures/ и собираются командой
+# `pixi run tikz-all`. Если нужен PDF-конспект лекции — запустите
+# `quarto render lectures/<id>/lecture.qmd --to pdf` руками; требуется
+# актуальный TeXLive с доступом к tlmgr.
+
+execute:
+  freeze: auto
+  cache: true
+
+bibliography: refs.bib
+csl: https://www.zotero.org/styles/ieee
+lang: ru

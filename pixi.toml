@@ -1,0 +1,54 @@
+[workspace]
+name = "ml3-neo"
+version = "0.1.0"
+description = "Курс ML3 для магистратур по data science"
+authors = ["ml3-neo team"]
+channels = ["conda-forge", "pytorch", "nvidia"]
+# osx-64 убран намеренно: PyTorch ≥ 2.5 не публикует колёса для Intel macOS.
+# Если нужен Intel mac — закрепите torch == 2.4.* и верните "osx-64".
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[tasks]
+preview      = "quarto preview"
+render       = "quarto render"
+lecture      = { cmd = "quarto preview lectures/$MODULE/lecture.qmd", env = { MODULE = "04-cnn" } }
+seminar      = { cmd = "marimo edit seminars/$MODULE/$LEVEL.py", env = { MODULE = "04-cnn", LEVEL = "basic" } }
+hw           = { cmd = "marimo edit homework/$HW/starter.py", env = { HW = "04-cnn-zoo" } }
+grade        = { cmd = "ml3 grade both $HW", env = { HW = "04-cnn-zoo" } }
+tikz         = "python figures/render.py"
+tikz-all     = "python figures/render.py --all"
+test         = "pytest grader/tests"
+
+[dependencies]
+python      = ">=3.11,<3.13"
+pip         = "*"
+numpy       = ">=2.0"
+scipy       = "*"
+matplotlib  = "*"
+pandas      = "*"
+scikit-learn = "*"
+opencv      = "*"
+albumentations = "*"
+tqdm        = "*"
+ipywidgets  = "*"
+quarto      = "*"
+tectonic    = "*"
+poppler     = "*"  # даёт pdftocairo -svg, универсально доступен
+pyyaml      = "*"
+typer       = "*"
+rich        = "*"
+pytest      = "*"
+jupyter     = "*"
+nbformat    = "*"
+nbclient    = "*"
+ipykernel   = "*"
+jupyter-cache = "*"
+
+[pypi-dependencies]
+torch         = ">=2.5"
+torchvision   = "*"
+torchaudio    = "*"
+marimo        = ">=0.10"
+huggingface-hub = "*"
+datasets      = "*"
+ml3-grade     = { path = "grader", editable = true }
