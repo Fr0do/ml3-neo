@@ -1,0 +1,140 @@
+---
+title: "Свёрточные нейронные сети"
+subtitle: "ml3-neo · модуль 04"
+format:
+  revealjs:
+    theme: dark
+    slide-number: true
+    incremental: false
+    transition: fade
+    width: 1280
+    height: 800
+    hash-type: number
+    html-math-method: katex
+    code-line-numbers: false
+bibliography: ../../refs.bib
+---
+
+## Свёрточные нейронные сети
+
+`ml3-neo · модуль 04`
+
+. . .
+
+После лекции вы:
+
+- понимаете, чем conv-слой отличается от FC и почему;
+- умеете считать receptive field руками;
+- знаете, зачем residual и какую норму выбрать;
+- разворачиваете аугментацию-pipeline за 5 минут.
+
+---
+
+## Зачем свёртки
+
+FC на $H{\times}W{\times}3$:
+
+- $O(HWC \cdot d_{\text{out}})$ параметров — слишком много;
+- не использует пространственную структуру;
+- не инвариантен к сдвигу.
+
+Conv:
+
+- **локальность** — окно $k{\times}k$;
+- **weight tying** — одно ядро на всё изображение;
+- **эквивариантность** — сдвиг входа = сдвиг выхода.
+
+---
+
+## Формула
+
+$$
+y_{c,i,j} = \sum_{c'} \sum_{u, v} W_{c, c', u, v}\, x_{c', i+u, j+v} + b_c
+$$
+
+Это **кросс-корреляция**, не математическая свёртка. PyTorch реализует именно её.
+
+---
+
+## Receptive field
+
+![](../../figures/tikz/_build/conv-receptive.svg){fig-align="center" width=70%}
+
+- $L$ слоёв $k{\times}k$ → RF $\approx 1 + L(k-1)$
+- stride 2 — удваивает RF на следующем шаге
+- dilation — экспоненциальный рост без потери разрешения
+
+---
+
+## Residual
+
+$$
+y = \mathcal{F}(x; W) + x
+$$
+
+![](../../figures/tikz/_build/residual.svg){fig-align="center" width=80%}
+
+- учим **смещение** от identity
+- $\partial y / \partial x = I + \partial \mathcal{F} / \partial x$ — градиент течёт
+
+---
+
+## Зоопарк нормализаций
+
+![](../../figures/tikz/_build/normalization.svg){fig-align="center" width=100%}
+
+---
+
+## Какую норму выбирать
+
+| Сценарий | Норма |
+|----------|-------|
+| Большой батч, классическая CNN | BatchNorm |
+| Малый батч, detection/segmentation | GroupNorm |
+| Transformer / sequence | LayerNorm |
+| Style transfer | InstanceNorm |
+| LLaMA-семейство | RMSNorm |
+
+. . .
+
+**Не выбирай по моде.** Выбирай по тому, что у тебя в батче и по какой оси нужна нормировка.
+
+---
+
+## Аугментации
+
+```python
+import albumentations as A
+
+train_tf = A.Compose([
+    A.RandomResizedCrop(64, 64, scale=(0.7, 1.0)),
+    A.HorizontalFlip(p=0.5),
+    A.ColorJitter(0.2, 0.2, 0.2, 0.05, p=0.7),
+    A.CoarseDropout(max_holes=4, max_height=16, max_width=16, p=0.5),
+    A.Normalize(),
+])
+```
+
+. . .
+
+Самая дешёвая и самая эффективная регуляризация в CV. Дешевле dropout, дешевле weight decay, дешевле архитектурных трюков.
+
+---
+
+## Дальше
+
+- **Семинар**: ResNet-18 на CIFAR-10 руками
+- **ДЗ `04-cnn-zoo`**: open задача на TinyImageNet
+  - leaderboard по accuracy
+  - judge-rubric: обоснование архитектурных решений
+- **Модуль 05**: sequence models, RNN → attention
+
+---
+
+## Минимум на запоминание
+
+1. Свёртка = локальный + переиспользуемый линейный оператор
+2. RF растёт по глубине, stride, dilation
+3. Residual делает глубокое обучение возможным
+4. Норма выбирается по оси усреднения, не по моде
+5. Аугментации — самая дешёвая регуляризация в CV

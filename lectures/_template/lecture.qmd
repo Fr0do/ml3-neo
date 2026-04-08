@@ -1,0 +1,57 @@
+---
+title: "Лекция NN — <название>"
+subtitle: "<подзаголовок>"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../refs.bib
+format:
+  html:
+    code-fold: false
+  pdf:
+    include-in-header:
+      - text: |
+          \input{../../figures/tikz/_preamble.tex}
+---
+
+::: {.callout-note title="Где мы в курсе"}
+TODO: где этот модуль в общей схеме, что предполагается прочитанным.
+:::
+
+::: {.level-toggle}
+[basic](../../seminars/<id>/basic.html){.active} · [advanced](../../seminars/<id>/advanced.html)
+:::
+
+## 1. Мотивация
+
+TODO: почему этот модуль вообще существует и что без него не получается.
+
+## 2. Ключевая идея
+
+TODO: одна центральная идея модуля. Желательно одной формулой или одной
+TikZ-схемой, к которой студент будет возвращаться весь модуль.
+
+::: {.callout-tip title="Где это в DL_BOOK"}
+TODO: ссылка на главу и страницу.
+:::
+
+## 3. Детали и подводные камни
+
+TODO.
+
+## 4. Что делать дальше
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар** ([basic](../../seminars/<id>/basic.html) / [advanced](../../seminars/<id>/advanced.html)): TODO.
+- **ДЗ**: [<id>-<topic>](../../homework/<id>-<topic>/README.qmd) — TODO одной строкой.
+:::
+
+::: {.callout-important title="Минимум на запоминание"}
+1. TODO
+2. TODO
+3. TODO
+:::
+
+## Литература {.appendix}
+
+::: {#refs}
+:::

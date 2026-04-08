@@ -1,0 +1,136 @@
+---
+title: "Лекция 04 — Свёрточные нейронные сети"
+subtitle: "Receptive field, residual, нормализации, аугментации"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это **четвёртый core-модуль**. Предполагается знакомство с MLP, batch/layer-нормализацией и базовым PyTorch (модули 02–03). Дальше — последовательные модели (модуль 05) и transformer (модуль 06).
+:::
+
+::: {.level-toggle}
+[basic](../../seminars/04-cnn/basic.html){.active} · [advanced](../../seminars/04-cnn/advanced.html)
+:::
+
+## 1. Зачем нам свёртки
+
+Полносвязный слой на изображении $H{\times}W{\times}3$ имеет $O(HWC \cdot d_{\text{out}})$ параметров и не использует пространственную структуру: он не знает, что соседние пиксели связаны, и не инвариантен к сдвигу. Свёрточный слой решает обе проблемы сразу:
+
+- **локальность** — каждый выходной пиксель зависит только от окна $k{\times}k$ во входе;
+- **разделение параметров** — одно и то же ядро $W \in \mathbb{R}^{k \times k \times C_{\text{in}} \times C_{\text{out}}}$ применяется ко всем позициям;
+- **эквивариантность к сдвигу** — сдвиг входа даёт сдвиг выхода.
+
+Формально один выходной канал есть кросс-корреляция:
+
+$$
+y_{c,i,j} \;=\; \sum_{c'=1}^{C_{\text{in}}} \sum_{u=0}^{k-1} \sum_{v=0}^{k-1}
+W_{c, c', u, v}\, x_{c', i+u, j+v} \;+\; b_c.
+$$
+
+::: {.callout-tip title="Где это в DL_BOOK"}
+Глава 1 «Нейронные сети» вводит общее определение слоя как обучаемого преобразования. Свёрточные слои — это специфическая параметризация $W$, в которой большинство компонент равны нулю или связаны (weight tying).
+:::
+
+## 2. Receptive field и его рост
+
+Receptive field (RF) выходного нейрона — множество входных пикселей, от которых он реально зависит. Для двух последовательных Conv $3{\times}3$ без stride RF растёт линейно: $1 \to 3 \to 5 \to 7$, и т.д.
+
+![Receptive field после двух Conv $3\times3$](../../figures/tikz/_build/conv-receptive.svg){#fig-rf width=85%}
+
+В чистых CNN рост RF идёт через комбинацию трёх механизмов:
+
+1. **глубина** — $L$ слоёв $k{\times}k$ дают RF $\approx 1 + L(k-1)$;
+2. **stride / pooling** — каждый $\text{stride}=2$ удваивает RF на следующем шаге;
+3. **dilated convolutions** — экспоненциальный рост RF без потери разрешения.
+
+Глобальный RF всей сети не должен быть меньше характерного объекта на изображении — иначе классификатор физически не «видит» полную сцену.
+
+## 3. Residual-блок
+
+Глубокие сети без шорткатов плохо обучаются: градиент затухает или взрывается, оптимизация ландшафта становится ущельной [@he2016deep]. Решение — добавить тождественный пропуск:
+
+$$
+y \;=\; \mathcal{F}(x; W) + x.
+$$
+
+Слой обучается *смещению* от identity, а не полному преобразованию. Это и упрощает оптимизацию (близко к нулю при инициализации), и улучшает протекание градиента: $\partial y / \partial x = I + \partial \mathcal{F} / \partial x$.
+
+![Базовый residual-блок (BasicBlock из ResNet-18)](../../figures/tikz/_build/residual.svg){#fig-resnet width=80%}
+
+::: {.callout-warning}
+Skip-connection требует, чтобы $\mathcal{F}(x)$ имел ту же форму, что $x$. Если меняется число каналов или пространственное разрешение — применяется $1{\times}1$ свёртка с stride на shortcut-ветке (downsample-блок).
+:::
+
+## 4. Нормализации: BN, LN, IN, GN, RMSNorm
+
+В свёрточных сетях BatchNorm [@ioffe2015batch] долго был стандартом. С приходом transformer-эры доминирует LayerNorm [@ba2016layer]. Между ними есть целый зоопарк промежуточных вариантов, и важно понимать, **по какой оси** усредняются $\mu, \sigma$ в каждом из них:
+
+![BN / LN / IN / GN / RMSNorm — подсвечена область усреднения](../../figures/tikz/_build/normalization.svg){#fig-norm width=100%}
+
+Общая форма для каждого из них одинаковая:
+
+$$
+\hat{x} = \frac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}, \qquad
+y = \gamma \hat{x} + \beta.
+$$
+
+Различие — *над какими измерениями* считаются $\mu$ и $\sigma$:
+
+| Норма | $\mu$ берётся по | Где живёт |
+|-------|------------------|-----------|
+| **BatchNorm** | $N \times H \times W$ для каждого канала $c$ | классические CNN |
+| **LayerNorm** | $C \times H \times W$ для каждого образца $n$ | transformer-подобные |
+| **InstanceNorm** | $H \times W$ для каждой пары $(n, c)$ | style transfer, GAN |
+| **GroupNorm** | $H \times W \times G$ внутри группы каналов [@wu2018group] | малые батчи, detection |
+| **RMSNorm** | без $\mu$, только $\mathrm{RMS}_n$ | LLaMA-семейство |
+
+::: {.callout-note title="Важно"}
+BatchNorm имеет **разное поведение** на train и eval (running stats), и плохо ведёт себя при batch size 1–4. Если у тебя малый батч (детектирование, сегментация на больших картинках) — почти всегда лучше GroupNorm.
+:::
+
+## 5. Аугментации: дешёвая регуляризация
+
+CNN склонны переобучаться на инвариантности, которых нет в данных. Решение — синтетически расширить обучающую выборку через преобразования, инвариантные к задаче:
+
+- **Геометрические:** flip, rotation, crop, perspective, elastic deform
+- **Фотометрические:** brightness, contrast, hue, gamma, blur, noise
+- **Mix-методы:** Cutout, Mixup, CutMix, RandAugment, AugMix
+
+Все они в курсе живут через [Albumentations](https://albumentations.ai). Семинар 04 ставит задачу подобрать такой набор, который улучшает baseline ResNet-18 на TinyImageNet хотя бы на 2 п.п.
+
+```python
+import albumentations as A
+
+train_tf = A.Compose([
+    A.RandomResizedCrop(64, 64, scale=(0.7, 1.0)),
+    A.HorizontalFlip(p=0.5),
+    A.ColorJitter(0.2, 0.2, 0.2, 0.05, p=0.7),
+    A.CoarseDropout(max_holes=4, max_height=16, max_width=16, p=0.5),
+    A.Normalize(),
+])
+```
+
+## 6. Что делать дальше
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар** ([basic](../../seminars/04-cnn/basic.html) / [advanced](../../seminars/04-cnn/advanced.html)): построить ResNet-18 из BasicBlock'ов, обучить на CIFAR-10, посмотреть на receptive field руками.
+- **ДЗ**: [04-cnn-zoo](../../homework/04-cnn-zoo/README.qmd) — open задача на TinyImageNet с leaderboard и judge-rubric.
+:::
+
+::: {.callout-important title="Минимум на запоминание"}
+1. Свёртка = локальный + переиспользуемый линейный оператор.
+2. RF растёт по глубине, stride и dilation.
+3. Residual делает оптимизацию глубоких сетей возможной.
+4. Норма выбирается по оси усреднения, а не по «модности».
+5. Аугментации — самая дешёвая и эффективная регуляризация в CV.
+:::
+
+## Литература {.appendix}
+
+::: {#refs}
+:::
