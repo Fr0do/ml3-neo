@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml3-grade"
+version = "0.1.0"
+description = "Локальный CLI грейдер для курса ml3-neo: leaderboard + LLM-судья через Swarm"
+requires-python = ">=3.11"
+authors = [{ name = "ml3-neo team" }]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13",
+  "pyyaml>=6",
+  "numpy>=2",
+]
+
+[project.scripts]
+ml3 = "ml3_grade.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["ml3_grade*"]
