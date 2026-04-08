@@ -1,0 +1,39 @@
+# Шаблон meta.yml. Скопируйте в новое ДЗ и заполните.
+id: <id>
+title: "<short title>"
+module: <module-id>
+level: both                # basic | advanced | both
+type: both                 # leaderboard | judge | both
+weight: 100
+deadline: "2026-MM-DDT23:59:00+03:00"
+
+leaderboard:
+  metric: <metric_name>
+  goal: max                # max | min
+  hidden_data: data/hidden/<id>/test.npz
+  baseline_score: 0.0
+  full_credit_score: 1.0
+  metric_weight: 60
+  bonus_top_n: 3
+  bonus_points: 5
+
+judge:
+  rubric: rubric.yml
+  weight: 40
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md
+
+submission:
+  required:
+    - submission/predictions.npy   # или другой формат
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml
+    - data/hidden/

@@ -1,0 +1,52 @@
+---
+title: "ДЗ NN — <название>"
+subtitle: "<подзаголовок>"
+---
+
+::: {.callout-note title="Тип ДЗ"}
+TODO: `leaderboard` | `judge` | `both`
+:::
+
+## Контекст
+
+TODO: что за задача, какие данные, что считается решением.
+
+## Что считается решением
+
+TODO: список файлов в `submission/` и их формат.
+
+## Грейдинг
+
+TODO: таблица режимов, ссылки на `meta.yml` и `rubric.yml`.
+
+## С чего начать
+
+1. `pixi run hw <id>` — открывает [`starter.py`](starter.py) в Marimo.
+2. TODO.
+
+## Анти-чит (общий для всего курса)
+
+На каждом ДЗ работают три слоя. Коротко — подробности в
+[`how-to-study.qmd`](../../how-to-study.qmd#почему-списывать-бесполезно).
+
+1. **Персональный инстанс.** Ваш hidden test выводится из
+   `sha256(hw_id + github-handle + course_salt)`. Чужой `predictions.npy`
+   на вашем инстансе даёт мусор.
+2. **Execution verifier.** Грейдер сам запускает ваш `notebook.py` на
+   вашем инстансе и сверяет `predictions.npy`. Mismatch → metric_points = 0.
+3. **Probing-вопросы.** Judge генерирует вопросы, укоренённые в вашем
+   инстансе и коде. Ответьте в `submission/ANSWERS.md`, иначе judge × 0.5.
+
+Ваш ноутбук должен:
+
+- читать путь к скрытому тесту из `ML3_HIDDEN_TEST`;
+- писать предсказания в `ML3_OUTPUT_PREDICTIONS`.
+
+Это контракт execution verifier'а, см. `grader/ml3_grade/execute.py`.
+
+## Что нельзя
+
+- Тренироваться на тестовом сете.
+- Хардкодить ответы (execution verifier отловит).
+- Копировать чужой сабмит (у вас свой инстанс).
+- TODO специфичные ограничения.

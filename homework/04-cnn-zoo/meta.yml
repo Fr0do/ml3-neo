@@ -1,0 +1,39 @@
+# Метаданные ДЗ для грейдера ml3-grade.
+id: 04-cnn-zoo
+title: "CNN zoo on TinyImageNet"
+module: 04-cnn
+level: both                # basic | advanced | both — для UI-фильтрации
+type: both                 # leaderboard | judge | both
+weight: 100                # максимум баллов
+deadline: "2026-05-15T23:59:00+03:00"
+
+leaderboard:
+  metric: accuracy         # имя метрики, должно совпадать с eval.py
+  goal: max                # max | min
+  hidden_data: data/hidden/test.npz   # gitignored, монтируется грейдером
+  baseline_score: 0.25     # ниже этого порога — 0 баллов
+  full_credit_score: 0.65  # выше этого — full 60 баллов
+  metric_weight: 60        # из 100 общего веса
+  bonus_top_n: 3           # сколько top-мест получают бонус
+  bonus_points: 5
+
+judge:
+  rubric: rubric.yml
+  weight: 40               # из 100 общего веса
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md   # из grader/prompts/
+
+submission:
+  required:
+    - submission/predictions.npy
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml
+    - data/hidden/

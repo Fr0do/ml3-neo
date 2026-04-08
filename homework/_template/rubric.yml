@@ -1,0 +1,53 @@
+# Шаблон rubric. Веса в сумме должны равняться meta.yml.judge.weight.
+# Скопируйте, адаптируйте критерии под специфику ДЗ.
+
+rubric:
+  total: 40
+
+  criteria:
+    - id: problem_framing
+      label: "Постановка задачи"
+      weight: 5
+      description: "TODO"
+      anchors:
+        5: "TODO"
+        3: "TODO"
+        0: "TODO"
+
+    - id: experimental_design
+      label: "Дизайн экспериментов"
+      weight: 12
+      description: "TODO"
+
+    - id: justification
+      label: "Обоснование решений"
+      weight: 10
+      description: "TODO"
+
+    - id: failure_analysis
+      label: "Что не сработало"
+      weight: 5
+      description: "TODO"
+
+    - id: creativity
+      label: "Креатив"
+      weight: 5
+      description: "TODO"
+
+    - id: code_quality
+      label: "Качество кода"
+      weight: 3
+      description: "TODO"
+
+  red_flags:
+    - "Тренировка на тестовом сете."
+    - "Захардкоженные predictions."
+
+  output_format: |
+    Верни строго JSON:
+    {
+      "scores": { "<criterion_id>": <number>, ... },
+      "comments": { "<criterion_id>": "<краткое объяснение>", ... },
+      "red_flags_triggered": ["..."],
+      "total": <number from 0 to 40>
+    }
