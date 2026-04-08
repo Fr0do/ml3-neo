@@ -1,0 +1,49 @@
+---
+title: "Программа курса"
+subtitle: "8 core-модулей + опциональные треки"
+---
+
+## Структура
+
+Курс собран из **модулей**. Модуль = одна лекция + два семинара (`basic`/`advanced`) + одно ДЗ. Лекция общая, расходятся семинары и ДЗ:
+
+- **basic** — с поддержкой, чёткое ТЗ, leaderboard-ориентированный сабмит.
+- **advanced** — open задача, минимум скаффолдинга, judge-оценка по rubric.
+
+Магистрантам рекомендуется идти по advanced-треку, basic — для тех, у кого мало бэкграунда в DL/PyTorch.
+
+## Core (8 модулей)
+
+| # | Модуль | Главная идея | TikZ-якорь |
+|---|--------|--------------|------------|
+| 01 | **Backprop & autograd** | Производная по графу вычислений с нуля на numpy | computation-graph |
+| 02 | **PyTorch fundamentals** | Тензоры, autograd, Dataset/DataLoader, training loop | training-loop |
+| 03 | **MLP & нормализации** | Регуляризация, BN/LN/IN/GN/RMSNorm side-by-side | [normalization](../figures/tikz/normalization.tex) |
+| 04 | **CNN** ← *reference* | Свёртки, receptive field, residual, аугментации | [residual](../figures/tikz/residual.tex) |
+| 05 | **Sequence models** | RNN → attention | attention |
+| 06 | **Transformer** | Полная архитектура, MHSA, positional encoding | transformer-block |
+| 07 | **Pretraining & fine-tuning** | LoRA, quantization basics, PEFT | lora |
+| 08 | **Generative intro** | VAE, диффузия в первом приближении | vae-diffusion |
+
+## Optional tracks
+
+Каждый трек — 2–4 модуля. Advanced-студенты выбирают **2–3** трека.
+
+- **T1. CV** — детектирование (YOLO), сегментация (U-Net), CRNN
+- **T2. NLP & LLMs** — токенизация, GPT, RAG, агенты
+- **T3. Efficient ML** — quantization, distillation, Mamba/SSMs
+- **T4. Generative** — диффузия, flow matching
+- **T5. Graphs & beyond** — GNN, KAN
+- **T6. RL** — policy gradients, PPO, RLHF
+
+## Грейдинг
+
+Каждое ДЗ помечено в `meta.yml`:
+
+| Тип | Что оценивается | Кто оценивает |
+|-----|-----------------|---------------|
+| `leaderboard` | Метрика на скрытом тесте | `eval.py` локально |
+| `judge` | Постановка, эксперименты, обоснование, креатив | Swarm-агенты Codex+Gemini по `rubric.yml` |
+| `both` | И то, и другое | Оба режима, итог = `floor(metric) + judge` |
+
+Технические задачи — leaderboard. Исследовательские/креативные — judge. Большинство ДЗ в курсе — `both`.

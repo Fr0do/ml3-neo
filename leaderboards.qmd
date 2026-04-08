@@ -1,0 +1,30 @@
+---
+title: "Leaderboards"
+---
+
+Сводка по всем соревновательным ДЗ. Файл генерируется автоматически из `grader/state/leaderboards.json` командой `ml3 grade render-leaderboards`.
+
+```{python}
+#| echo: false
+#| output: asis
+import json
+from pathlib import Path
+
+state = Path("grader/state/leaderboards.json")
+if not state.exists():
+    print("*Пока нет сабмитов.*")
+else:
+    data = json.loads(state.read_text())
+    for hw_id, board in data.items():
+        print(f"\n## {hw_id}\n")
+        print(f"**Метрика:** `{board['metric']}` · **Цель:** {board['goal']}\n")
+        print("| Rank | Student | Score | Submitted |")
+        print("|---:|:---|---:|:---|")
+        rows = sorted(
+            board["submissions"],
+            key=lambda r: r["score"],
+            reverse=board["goal"] == "max",
+        )
+        for i, row in enumerate(rows, 1):
+            print(f"| {i} | {row['student']} | {row['score']:.4f} | {row['ts']} |")
+```
