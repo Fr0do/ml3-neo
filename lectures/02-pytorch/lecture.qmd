@@ -9,10 +9,6 @@ format:
     code-fold: false
     toc: true
     toc-depth: 3
-  pdf:
-    include-in-header:
-      - text: |
-          \input{../../figures/tikz/_preamble.tex}
 ---
 
 ::: {.callout-note title="Где мы в курсе"}

@@ -7,10 +7,6 @@ bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
-  pdf:
-    include-in-header:
-      - text: |
-          \input{../../figures/tikz/_preamble.tex}
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
