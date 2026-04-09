@@ -48,7 +48,8 @@ jobs:
         run: pixi install
 
       - name: Render TikZ figures
-        run: pixi run tikz-all
+        run: pixi run tikz-all || echo "::warning::TikZ render failed — site will build without SVG figures"
+        continue-on-error: true
 
       - name: Render leaderboards from state
         run: pixi run ml3 render-leaderboards || true
