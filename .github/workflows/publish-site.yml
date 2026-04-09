@@ -1,0 +1,72 @@
+name: publish-site
+
+# Только публикация Quarto-сайта на GitHub Pages.
+# Грейдинг (Swarm-агенты) намеренно НЕ запускается в CI — он живёт локально
+# у инструктора, потому что Swarm требует подписочные CLI.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "_quarto.yml"
+      - "index.qmd"
+      - "syllabus.qmd"
+      - "how-to-study.qmd"
+      - "leaderboards.qmd"
+      - "lectures/**"
+      - "homework/**/README.qmd"
+      - "figures/**"
+      - "theme.css"
+      - "refs.bib"
+      - ".github/workflows/publish-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: latest
+          cache: true
+
+      - name: Install course environment
+        run: pixi install
+
+      - name: Render TikZ figures
+        run: pixi run tikz-all
+
+      - name: Render leaderboards from state
+        run: pixi run ml3 render-leaderboards || true
+
+      - name: Render Quarto site
+        run: pixi run render
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
