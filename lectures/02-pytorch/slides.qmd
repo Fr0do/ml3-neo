@@ -1,0 +1,87 @@
+---
+title: "02 — PyTorch Fundamentals"
+author: "ml3-neo"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+---
+
+## PyTorch: Зачем?
+
+- Автоматическое дифференцирование (Autograd)
+- Эффективные вычисления на GPU
+- Экосистема (TorchVision, TorchText, HuggingFace)
+- Pythonic (в отличие от старого TensorFlow 1.x)
+
+## Tensor: ndarray + Graph
+
+- Хранилище данных (`storage`)
+- Метаданные (`shape`, `strides`, `device`, `dtype`)
+- Связь с вычислительным графом (`grad_fn`)
+
+```python
+x = torch.randn(3, 4, requires_grad=True)
+```
+
+## Autograd: Магия Градиентов
+
+```python
+# Прямой проход (Forward)
+y = x @ W + b
+loss = criterion(y, target)
+
+# Обратный проход (Backward)
+loss.backward()
+
+# Теперь W.grad содержит градиенты dL/dW
+```
+
+## nn.Module: Блоки Нейросетей
+
+Любая сеть — это `nn.Module`.
+
+```python
+class MyNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(10, 2)
+        
+    def forward(self, x):
+        return torch.relu(self.fc(x))
+```
+- `self.parameters()` для оптимизатора.
+- `self.state_dict()` для сохранения весов.
+
+## Цикл Обучения (Training Loop)
+
+```python
+model.train() # Важно для Dropout / BatchNorm
+for x, y in dataloader:
+    x, y = x.to(device), y.to(device)
+    
+    optimizer.zero_grad() # 1. Очистка
+    
+    out = model(x)        # 2. Forward
+    loss = criterion(out, y)
+    
+    loss.backward()       # 3. Backward
+    optimizer.step()      # 4. Обновление весов
+```
+
+## Data Loading
+
+- **Dataset**: `__len__` и `__getitem__`.
+- **DataLoader**: Батчинг, шаффлинг, параллельная загрузка (`num_workers`), `pin_memory`.
+
+## Продвинутые техники
+- **Gradient Accumulation**: Накопление `.grad` за несколько шагов до `optimizer.step()`.
+- **Mixed Precision (AMP)**: `torch.cuda.amp.autocast()` — FP16 для скорости, FP32 для стабильности.
+- **Anomaly Detection**: `torch.autograd.set_detect_anomaly(True)` для поиска NaN.
+
+## Debugging
+
+- Утечки памяти: не забывайте `.item()` или `.detach()` при сборе метрик!
+  `losses.append(loss.item())`
+- Проверка `.grad` перед `.step()`.
+- Использование `torch.profiler` для поиска bottlenecks (CPU/GPU transfer).

@@ -1,0 +1,39 @@
+---
+title: "Лекция Graphs — Graph Neural Networks и KAN"
+subtitle: "От GCN до Kolmogorov-Arnold Networks"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это optional track по графам. Рассматривается работа с неструктурированными данными.
+:::
+
+## 1. Граф как структура данных
+Граф $G = (V, E)$, задаётся матрицей смежности $A$ (или списком рёбер edge list), а также признаками узлов $X$ и рёбер $E_{feat}$.
+
+## 2. Message Passing Framework
+Общая логика GNN включает три этапа для каждой вершины:
+1. **Aggregate**: сбор сообщений от соседей.
+2. **Update**: обновление состояния вершины на основе собранного сообщения и предыдущего состояния.
+3. **Readout**: агрегация графа в один вектор (для graph-level задач).
+
+## 3. GCN, GAT и GraphSAGE
+- **GCN (Graph Convolutional Network)**: Нормализация по степени, спектральная и пространственная интерпретации.
+- **GAT (Graph Attention Network)**: веса агрегации вычисляются через механизм внимания.
+- **GraphSAGE**: сэмплирование соседей для масштабируемости на большие графы.
+
+## 4. Применения
+Предсказание свойств молекул (molecular property prediction), социальные сети, графы знаний (knowledge graphs).
+
+## 5. KAN (Kolmogorov-Arnold Networks)
+Альтернатива MLP. Основная идея: обучаемые функции активации (сплайны) на рёбрах (весах) сети, а не в узлах. Обеспечивает интерпретируемость и потенциально лучшую аппроксимацию.
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар**: [advanced](../../../seminars/tracks/graphs/advanced.html) — GCN с нуля на Karate Club.
+- **ДЗ**: [graphs](../../../homework/tracks/graphs/README.qmd) — link prediction или node classification на кастомном графе.
+:::

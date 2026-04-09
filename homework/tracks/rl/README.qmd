@@ -1,0 +1,7 @@
+---
+title: "Homework: RL"
+---
+
+# Задание
+Обучить RL агент на gym environment по выбору (не CartPole).
+Задокументировать reward curve, провести ablation по $\gamma$ или lr, проанализировать sample efficiency.

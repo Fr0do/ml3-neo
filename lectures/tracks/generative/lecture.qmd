@@ -1,0 +1,40 @@
+---
+title: "Лекция Generative — Диффузия и Flow Matching"
+subtitle: "От DDPM к современным генеративным моделям"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это optional track по Generative ML (advanced). Предполагается понимание базовых генеративных моделей (VAE, GAN) и оптимизации ELBO.
+:::
+
+## 1. DDPM: Denoising Diffusion Probabilistic Models
+
+Диффузионные модели состоят из двух процессов:
+- **Forward process**: постепенное зашумление данных до чистого гауссовского шума.
+- **Reverse process**: обучаемая нейросеть (обычно U-Net) пытается обратить процесс.
+
+Оптимизируется вариационная нижняя оценка (ELBO), которая сводится к MSE между предсказанным и реальным шумом.
+
+## 2. DDIM и ускорение сэмплинга
+
+DDIM (Denoising Diffusion Implicit Models) переформулирует процесс как немарковский, что позволяет делать детерминированный сэмплинг и ускорять генерацию в 10-50 раз за счёт прыжков через шаги.
+
+## 3. Classifier-Free Guidance (CFG)
+
+Метод позволяет совместить условную (conditional) и безусловную (unconditional) генерацию, улучшая соответствие сгенерированных изображений условию.
+
+## 4. Flow Matching и Latent Diffusion
+
+- **Flow Matching**: формулировка через обыкновенные дифференциальные уравнения (ODE). Conditional flow matching часто проще в реализации и стабильнее, чем классическая диффузия.
+- **Latent Diffusion**: перенос диффузионного процесса из пространства пикселей в скрытое пространство (latent space) автоэнкодера (как в Stable Diffusion) для значительного ускорения.
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар**: [advanced](../../../seminars/tracks/generative/advanced.html) — DDPM с нуля на MNIST.
+- **ДЗ**: [generative](../../../homework/tracks/generative/README.qmd) — conditional diffusion model с CFG.
+:::

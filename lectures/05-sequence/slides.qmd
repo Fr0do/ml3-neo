@@ -1,0 +1,54 @@
+---
+title: "Sequence models"
+subtitle: "RNN, LSTM, GRU и Attention"
+format: revealjs
+---
+
+# Sequence Models
+
+Зачем они нужны?
+
+- Тексты (NLP)
+- Временные ряды (Timeseries)
+- Аудио
+- Любые данные с естественным порядком и переменной длиной
+
+# Базовая RNN
+
+$$
+h_t = \tanh(W_{hh} h_{t-1} + W_{xh} x_t + b_h)
+$$
+
+Проблема: Vanishing / Exploding gradients. При Backpropagation Through Time (BPTT) градиенты многократно умножаются на матрицу $W_{hh}$.
+
+# LSTM: Long Short-Term Memory
+
+Вводит **Cell State** ($c_t$) и систему вентилей (gates):
+- **Forget gate**: что забыть
+- **Input gate**: что запомнить
+- **Output gate**: что передать дальше
+
+Создаёт gradient highway!
+
+# GRU: Gated Recurrent Unit
+
+Упрощение LSTM:
+- Нет отдельного cell state, только $h_t$
+- **Reset gate**: насколько забыть прошлое
+- **Update gate**: баланс между старым и новым состоянием
+
+# Bidirectional RNN
+
+- Читаем последовательность вперёд ($\overrightarrow{h}_t$)
+- Читаем последовательность назад ($\overleftarrow{h}_t$)
+- Конкатенируем: $h_t = [\overrightarrow{h}_t; \overleftarrow{h}_t]$
+- Знаем весь контекст!
+
+# Attention
+
+Проблема: сжать длинный текст в один вектор сложно.
+Решение: **Bahdanau Attention**
+
+- На каждом шаге декодера взвешиваем все $h_i$ из энкодера.
+- Создаём вектор контекста $c_t = \sum \alpha_{ti} h_i$.
+- **Alignment matrix**: визуализирует веса $\alpha_{ti}$, показывая, куда "смотрит" модель.

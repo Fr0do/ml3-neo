@@ -1,0 +1,38 @@
+id: 06-transformer
+title: "Transformer Encoder from scratch"
+module: 06-transformer
+level: both
+type: both
+weight: 100
+deadline: "2026-06-01T23:59:00+03:00"
+
+leaderboard:
+  metric: macro_f1
+  goal: max
+  hidden_data: data/hidden/test.npz
+  baseline_score: 0.60
+  full_credit_score: 0.82
+  metric_weight: 55
+  bonus_top_n: 3
+  bonus_points: 5
+
+judge:
+  rubric: rubric.yml
+  weight: 45
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md
+
+submission:
+  required:
+    - submission/predictions.npy
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml
+    - data/hidden/

@@ -1,0 +1,31 @@
+---
+title: "ДЗ 06 — transformer"
+subtitle: "Реализация Transformer Encoder с нуля"
+---
+
+::: {.callout-note title="Тип ДЗ"}
+**`both`** — оценка = `floor(metric_score) + judge_score`.
+:::
+
+## Контекст
+
+Вам нужно реализовать блок Transformer Encoder полностью с нуля (без `torch.nn.TransformerEncoder` и `torch.nn.MultiheadAttention`) и применить его для задачи классификации текстов.
+
+## Что считается решением
+
+- `submission/predictions.npy` — предсказанные классы для скрытого тестового набора.
+- `submission/notebook.py` — Marimo-ноутбук с вашим кодом.
+- `submission/MODEL.md` — защита выбора (Pre-LN vs Post-LN, гиперпараметры, обоснование размерностей).
+
+## Грейдинг
+
+Метрика: **macro F1** (classification).
+Baseline: 0.60. Full credit: 0.82.
+Вес метрики: 55 баллов.
+Judge (LLM): 45 баллов. 
+
+## Анти-чит: как устроен грейдинг
+
+1. **Персональный инстанс**: У каждого студента свой `ML3_HIDDEN_TEST` сет данных. Предикты соседа не подойдут.
+2. **Execution verifier**: Ваш код исполняется в sandbox-окружении, генерируя `predictions.npy`. Результат должен сходиться с засабмиченным файлом. В скрипте стартера данные и предсказания читаются из переменных окружения `ML3_HIDDEN_TEST` и `ML3_OUTPUT_PREDICTIONS`. Убедитесь, что ваш скрипт читает их корректно.
+3. **Запрет стандартных реализаций**: Использование `torch.nn.TransformerEncoder` или `torch.nn.MultiheadAttention` приведёт к обнулению judge-оценки (см. `red_flags` в рубрике).

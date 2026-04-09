@@ -1,0 +1,27 @@
+# Метаданные ДЗ для грейдера ml3-grade.
+id: 07-pretrain
+title: "LoRA Fine-Tuning Exploration"
+module: 07-pretrain
+level: advanced
+type: judge
+weight: 100
+
+judge:
+  rubric: rubric.yml
+  weight: 100
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md
+
+submission:
+  required:
+    - submission/predictions.npy
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml

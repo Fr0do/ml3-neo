@@ -1,0 +1,39 @@
+---
+title: "Лекция RL — Reinforcement Learning"
+subtitle: "От Policy Gradients до RLHF"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это optional track по RL. Знакомит с основами обучения с подкреплением и его современным применением (RLHF).
+:::
+
+## 1. MDP: Марковский процесс принятия решений
+Формализм RL основан на MDP: состояние $S_t$, действие $A_t$, награда $R_t$, discount factor $\gamma$. Цель агента — максимизировать ожидаемую сумму дисконтированных наград.
+
+## 2. Policy Gradient
+Оптимизируем саму политику $\pi_\theta(a|s)$. Метод REINFORCE использует теорему о градиенте политики. Использование baseline помогает снизить variance.
+
+## 3. Actor-Critic
+Модель состоит из Actor (политика) и Critic (оценка ценности). Advantage function используется для стабильности. Метод A2C.
+
+## 4. PPO (Proximal Policy Optimization)
+Clip objective предотвращает слишком сильное изменение политики за один шаг обновления. Importance sampling позволяет переиспользовать траектории. PPO стал индустриальным стандартом благодаря своей стабильности.
+
+## 5. RLHF (RL from Human Feedback)
+Используется для выравнивания (alignment) LLM:
+1. Обучение Reward Model на разметке людей (какой ответ лучше).
+2. PPO для дообучения LLM максимизировать Reward Model.
+
+## 6. Отличие RL от DL
+RL сложнее из-за нестационарности распределения (агент сам влияет на то, какие данные он видит), sparse rewards (награда может быть очень редкой) и дилеммы exploration vs exploitation.
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар**: [advanced](../../../seminars/tracks/rl/advanced.html) — REINFORCE и A2C на CartPole.
+- **ДЗ**: [rl](../../../homework/tracks/rl/README.qmd) — RL агент на новом окружении с ablation study.
+:::

@@ -1,0 +1,4 @@
+training_stability: 25
+hyperparameter_ablation: 30
+environment_choice: 15
+writeup: 30

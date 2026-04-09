@@ -1,0 +1,27 @@
+# Метаданные ДЗ для грейдера ml3-grade.
+id: 01-backprop
+title: "Mini-autograd engine"
+module: 01-backprop
+level: both                # basic | advanced | both — для UI-фильтрации
+type: judge                # leaderboard | judge | both
+weight: 100                # максимум баллов
+deadline: "2026-05-15T23:59:00+03:00"
+
+judge:
+  rubric: rubric.yml
+  weight: 100              # из 100 общего веса
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md   # из grader/prompts/
+
+submission:
+  required:
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml

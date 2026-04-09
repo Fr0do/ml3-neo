@@ -1,0 +1,10 @@
+---
+title: "Generative: Diffusion & Flow Matching"
+format: revealjs
+---
+
+## Диффузия
+- DDPM: Forward & Reverse processes
+- DDIM для ускорения
+- Classifier-Free Guidance
+- Flow Matching & Latent Diffusion

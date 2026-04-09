@@ -1,0 +1,46 @@
+---
+title: "Лекция Efficient — Efficient ML"
+subtitle: "Квантизация, дистилляция, SSMs"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это optional track по Efficient ML. Предполагается знание архитектуры Transformer и базовых принципов обучения сетей.
+:::
+
+## 1. Мотивация
+
+Большие модели (LLM, ViT) требуют огромных вычислительных ресурсов. Чтобы запускать их на потребительском железе и ускорять инференс, мы используем методы сжатия моделей и альтернативные архитектуры.
+
+## 2. Квантизация (Quantization)
+
+Перевод весов и активаций из FP32/FP16 в форматы с меньшей разрядностью (INT8, INT4).
+- **PTQ (Post-Training Quantization)**: квантизация уже обученной модели. 
+- **QAT (Quantization-Aware Training)**: симуляция квантизации во время обучения.
+
+Алгоритм LLM.int8() (и GPTQ) позволяет сжать веса до 8 или 4 бит, минимизируя деградацию качества с помощью выделения outlier-ов и умного округления:
+$$ W_{q} = \text{round}\left( \frac{W}{S} \right) + Z $$
+Где $S$ (scale) и $Z$ (zero-point) — параметры квантизации (absmax).
+
+## 3. Дистилляция и Pruning
+
+- **Knowledge Distillation**: обучение маленькой модели (student) на выходах (soft labels) большой модели (teacher) с использованием температуры $T$.
+- **Pruning**: удаление части весов (magnitude-based). Structured pruning удаляет целые каналы/головы, unstructured — отдельные веса.
+
+## 4. State Space Models (SSMs)
+
+Mamba и другие SSMs предлагают альтернативу attention-механизму. Они используют селективные пространства состояний (selective state spaces), что позволяет получить линейную сложность $O(N)$ от длины контекста в отличие от $O(N^2)$ в Transformer, сохраняя при этом качество.
+
+## 5. Практика и инструменты
+
+Используются библиотеки: `torch.quantization`, HuggingFace `optimum`, `bitsandbytes` (для llm.int8).
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар**: [advanced](../../../seminars/tracks/efficient/advanced.html) — квантизация ResNet-18 в INT8.
+- **ДЗ**: [efficient](../../../homework/tracks/efficient/README.qmd) — применение 2+ техник сжатия и построение Pareto frontier.
+:::

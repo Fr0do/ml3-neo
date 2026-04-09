@@ -1,0 +1,43 @@
+---
+title: "Лекция: Computer Vision — детекция объектов и сегментация"
+author: "ml3-neo"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+---
+
+## От классификации к детекции
+- Классификация: один класс на картинку.
+- Детекция: координаты (Bounding Boxes) + классы.
+- **Anchor boxes**: заранее заданные рамки-шаблоны.
+- **Regression head**: предсказание смещений $\Delta x, \Delta y, \Delta w, \Delta h$.
+
+## YOLO v1
+- Разбиваем картинку на $S \times S$ grid.
+- Каждая ячейка предсказывает $B$ рамок.
+- Для рамки: $(x, y, w, h, \text{confidence})$.
+- Для ячейки: вероятности классов.
+- Быстро, end-to-end.
+
+## Modern YOLO & NMS
+- **Neck (FPN)**: Feature Pyramid Network для multi-scale.
+- Маленькие объекты ищем на ранних feature maps.
+- **NMS (Non-Maximum Suppression)**: 
+  - Сортируем по score.
+  - Убираем рамки с $\text{IoU} > \text{threshold}$.
+
+## Сегментация (U-Net)
+- Semantic vs Instance.
+- **U-Net**: Encoder -> Decoder.
+- **Skip connections**: проброс карт признаков для сохранения локализации.
+
+## Метрики
+- **IoU**: Intersection over Union.
+- **mAP@50**: mean Average Precision при $\text{IoU} \ge 0.5$.
+- **mAP@50:95**: строгая метрика, усредненная по порогам $\text{IoU} \in [0.5, 0.95]$.
+
+## Практика в PyTorch
+- `torchvision.ops.box_iou`
+- `torchvision.ops.nms`
+- COCO API

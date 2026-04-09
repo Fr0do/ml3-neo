@@ -1,0 +1,28 @@
+# Метаданные ДЗ для грейдера ml3-grade.
+id: 08-generative
+title: "VAE and Latent Space Analysis"
+module: 08-generative
+level: both
+type: judge
+weight: 100
+deadline: "2026-06-01T23:59:00+03:00"
+
+judge:
+  rubric: rubric.yml
+  weight: 100
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md
+
+submission:
+  required:
+    - submission/results.json
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml

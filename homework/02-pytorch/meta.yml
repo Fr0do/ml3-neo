@@ -1,0 +1,38 @@
+id: 02-pytorch
+title: "CIFAR-10 from scratch"
+module: 02-pytorch
+level: both
+type: both
+weight: 100
+deadline: "2026-03-01T23:59:00+03:00"
+
+leaderboard:
+  metric: accuracy
+  goal: max
+  hidden_data: data/hidden/test.npz
+  baseline_score: 0.80
+  full_credit_score: 0.90
+  metric_weight: 70
+  bonus_top_n: 3
+  bonus_points: 5
+
+judge:
+  rubric: rubric.yml
+  weight: 30
+  agents:
+    - codex
+    - gemini
+  ensemble: median
+  prompt_template: judge_system.md
+
+submission:
+  required:
+    - submission/predictions.npy
+    - submission/notebook.py
+    - submission/MODEL.md
+  forbidden_edits:
+    - eval.py
+    - tests/
+    - meta.yml
+    - rubric.yml
+    - data/hidden/

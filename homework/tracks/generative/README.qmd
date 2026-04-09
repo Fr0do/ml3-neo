@@ -1,0 +1,7 @@
+---
+title: "Homework: Generative"
+---
+
+# Задание
+Студент обучает conditional diffusion model на датасете из персонального инстанса.
+Нужно исследовать CFG scale effect и показать interpolation в latent space.

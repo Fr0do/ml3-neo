@@ -1,0 +1,46 @@
+rubric:
+  total: 45
+
+  criteria:
+    - id: implementation_correctness
+      label: "Корректность реализации"
+      weight: 20
+      description: |
+        Attention реализован верно (масштабирование, маскирование опционально, multi-head логика верна, нет утечек).
+      anchors:
+        20: "Всё реализовано корректно и с нуля."
+        10: "Есть мелкие ошибки в тензорных операциях или reshape."
+        0:  "Грубые логические ошибки или не реализовано с нуля."
+
+    - id: architecture_choices
+      label: "Обоснование гиперпараметров"
+      weight: 15
+      description: |
+        Обоснованы d_model, n_heads, n_layers, FFN ratio.
+      anchors:
+        15: "Полное и убедительное обоснование каждого параметра."
+        7:  "Частичное обоснование, некоторые параметры взяты случайно."
+        0:  "Нет обоснования."
+
+    - id: analysis
+      label: "Анализ (Ablation)"
+      weight: 10
+      description: |
+        Исследован эффект Pre-LN vs Post-LN или проведена n_heads ablation.
+      anchors:
+        10: "Глубокое исследование с метриками и графиками."
+        5:  "Поверхностное сравнение без четких выводов."
+        0:  "Анализ отсутствует."
+
+  red_flags:
+    - "used_nn_transformer_encoder"
+    - "attention_not_from_scratch"
+
+  output_format: |
+    Верни строго JSON следующего вида:
+    {
+      "scores": { "<criterion_id>": <number>, ... },
+      "comments": { "<criterion_id>": "<краткое объяснение оценки>", ... },
+      "red_flags_triggered": ["..."],
+      "total": <number from 0 to 45>
+    }

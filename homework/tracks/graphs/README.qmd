@@ -1,0 +1,6 @@
+---
+title: "Homework: Graphs"
+---
+
+# Задание
+Применить GNN к задаче из персонального инстанса (link prediction или node classification на кастомном графе).

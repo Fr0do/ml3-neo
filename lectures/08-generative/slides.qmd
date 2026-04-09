@@ -1,0 +1,82 @@
+---
+title: "Введение в генеративные модели"
+subtitle: "VAE и диффузия"
+author: "ml3-neo"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+    transition: slide
+    mathjax: true
+---
+
+## Генеративное моделирование
+
+- Discriminative: $p(y|x)$ (Кошка или собака?)
+- Generative: $p(x)$ (Как выглядит кошка?)
+  - Density estimation
+  - Sampling (Синтез новых данных)
+
+---
+
+## Latent Variable Models
+
+Вводим скрытое пространство (Latent space) $z$.
+- $p(z)$ — **Prior** (обычно $\mathcal{N}(0, I)$)
+- $p(x|z)$ — **Декодер** (Генератор)
+
+Как найти $p(z|x)$? (Posterior)
+Интеграл $\int p(x|z)p(z)dz$ невычислим.
+
+---
+
+## VAE: ELBO декомпозиция
+
+Аппроксимируем posterior сетью $q(z|x)$ (**Энкодер**).
+Максимизируем ELBO (Evidence Lower Bound):
+
+$$ \text{ELBO} = \mathbb{E}_{q(z|x)}[\log p(x|z)] - \mathbb{KL}(q(z|x) \| p(z)) $$
+
+1. **Reconstruction**: Декодер должен восстановить $x$.
+2. **KL-Penalty**: Энкодер должен выдавать $z$, похожее на нормальное распределение.
+
+---
+
+## Reparameterization Trick
+
+Как взять производную по $\mu$ и $\sigma$, если $z \sim \mathcal{N}(\mu, \sigma^2)$?
+**Сэмплирование недефференцируемо!**
+
+Трюк:
+$$ z = \mu + \sigma \odot \varepsilon, \quad \varepsilon \sim \mathcal{N}(0, I) $$
+Градиент теперь легко течёт через $\mu$ и $\sigma$.
+
+---
+
+## Диффузионные модели (DDPM)
+
+### Forward Process (Разрушение)
+Добавляем шум $T$ шагов:
+$$ q(x_t | x_{t-1}) = \mathcal{N}(\sqrt{1-\beta_t}x_{t-1}, \beta_t I) $$
+В пределе получаем чистый шум.
+
+### Reverse Process (Создание)
+Учим нейросеть убирать шум шаг за шагом:
+$$ p_\theta(x_{t-1} | x_t) $$
+
+---
+
+## Training Objective
+
+Вместо предсказания $x_0$, мы учим U-Net предсказывать **добавленный шум** $\varepsilon$:
+
+$$ \mathcal{L} = \mathbb{E}_{t, x_0, \varepsilon} \left[ \| \varepsilon - \varepsilon_\theta(x_t, t) \|^2 \right] $$
+
+Это эквивалентно оптимизации вариационной границы (ELBO) для диффузии.
+
+---
+
+## Итог: VAE vs Diffusion
+
+- **VAE**: Явное и полезное латентное пространство (disentanglement), математически элегантно, но размытые картинки.
+- **Diffusion**: SOTA качество, стабильное обучение (в отличие от GAN), но долгий сэмплинг. В основе Stable Diffusion (Latent Diffusion).

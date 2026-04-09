@@ -1,0 +1,46 @@
+rubric:
+  total: 30
+
+  criteria:
+    - id: training_recipe
+      label: "Training Recipe"
+      weight: 12
+      description: |
+        Обоснован выбор гиперпараметров обучения: learning rate, batch size, scheduler, augmentations.
+      anchors:
+        12: "Все параметры обоснованы, рецепт целостный и логичный."
+        6: "Частичное обоснование, некоторые параметры взяты случайно."
+        0: "Нет обоснования."
+
+    - id: ablation
+      label: "Ablation Studies"
+      weight: 10
+      description: |
+        Показано хотя бы 2 ablation study (например: с/без augmentation, разные оптимизаторы SGD vs Adam).
+      anchors:
+        10: "Два чистых эксперимента с изолированными факторами."
+        5: "Один эксперимент или факторы смешаны."
+        0: "Нет экспериментов."
+
+    - id: writeup
+      label: "Writeup / MODEL.md"
+      weight: 8
+      description: |
+        MODEL.md чётко описывает, что работало, что нет, какая архитектура была выбрана.
+      anchors:
+        8: "Ясный и лаконичный отчет."
+        4: "Отчет есть, но поверхностный."
+        0: "Отчет отсутствует или неинформативен."
+
+  red_flags:
+    - "pretrained_weights_used"
+    - "test_set_peeked"
+
+  output_format: |
+    Верни строго JSON:
+    {
+      "scores": { "<criterion_id>": <number>, ... },
+      "comments": { "<criterion_id>": "<краткое объяснение>", ... },
+      "red_flags_triggered": ["..."],
+      "total": <number from 0 to 30>
+    }

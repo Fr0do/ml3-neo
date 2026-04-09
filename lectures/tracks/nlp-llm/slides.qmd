@@ -1,0 +1,43 @@
+---
+title: "Лекция: NLP и LLMs — от токенизации до агентов"
+author: "ml3-neo"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+---
+
+## Tokenization
+- Не слова и не буквы: **Subwords**.
+- **BPE** (Byte-Pair Encoding): частотные пары сливаются.
+- **WordPiece**, **SentencePiece**.
+- Компромисс: словарь (Vocab) $\leftrightarrow$ длина контекста.
+
+## GPT и KV-Cache
+- **Causal LM**: предсказываем только вперед (Autoregressive).
+- Внимание $O(N^2)$ при генерации — медленно.
+- **KV-Cache**: сохраняем $K$ и $V$ прошлых токенов.
+- Сложность шага генерации падает до $O(N)$.
+
+## Scaling Laws
+- Loss падает степенным образом от $N$ (params) и $D$ (data).
+- **Chinchilla Optimal**: $\Delta N \propto \Delta D$. Около 20 токенов на параметр.
+- **Emergent Abilities**: эмерджентность способностей у гигантских моделей.
+
+## Alignment (RLHF)
+- Учим модель быть полезной и безопасной.
+- **Reward Model**: предсказывает оценку человека.
+- Оптимизируем веса LLM с помощью **PPO** (Reinforcement Learning).
+- **RLAIF**: вместо человека — размечает другая LLM.
+
+## RAG
+- Retrieval-Augmented Generation.
+- Текст $\to$ Чанки (Chunking).
+- Embeddings $\to$ Векторная база (FAISS).
+- **Поиск**: Cosine Similarity.
+- **Генерация**: Промпт = Контекст из базы + Вопрос.
+
+## Agents & Tools
+- LLM могут использовать внешние инструменты.
+- **Function Calling**: генерация структурированного JSON.
+- **ReAct** (Reason + Act): цикл Thought $\to$ Action $\to$ Observation.

@@ -1,0 +1,8 @@
+type: both
+leaderboard:
+  metric: roc_auc
+  baseline: 0.65
+  full_credit: 0.85
+  metric_weight: 60
+judge:
+  weight: 40

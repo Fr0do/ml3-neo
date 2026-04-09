@@ -1,0 +1,67 @@
+---
+title: "Лекция: NLP и LLMs — от токенизации до агентов"
+subtitle: "Optional Track: nlp-llm"
+author: "ml3-neo"
+date: last-modified
+bibliography: ../../../refs.bib
+format:
+  html:
+    code-fold: false
+---
+
+::: {.callout-note title="Где мы в курсе"}
+Это **optional track** по современным NLP моделям и LLM. Предполагается знакомство с архитектурой Transformer (модуль 06).
+:::
+
+::: {.level-toggle}
+[advanced](../../../seminars/tracks/nlp-llm/advanced.html){.active}
+:::
+
+## 1. Tokenization
+
+Современные языковые модели не работают с буквами или словами напрямую. Они используют subword-токенизацию:
+- **BPE (Byte-Pair Encoding)**: итеративно сливает самые частые пары байтов/символов в один токен (GPT-2, GPT-3, Llama).
+- **WordPiece**: похож на BPE, но на каждом шаге выбирает пару для слияния, максимизирующую правдоподобие (BERT).
+- **SentencePiece**: обрабатывает текст как сырой поток символов, включая пробелы (T5, ALBERT).
+
+Трейдоффы: размер словаря (vocab size) vs длина последовательности (sequence length).
+
+## 2. GPT Архитектура
+
+- **Causal LM (Autoregressive Generation)**: предсказание следующего токена при условии всех предыдущих.
+- **KV-Cache**: кеширование Key и Value матриц предыдущих токенов во время генерации, чтобы не пересчитывать их на каждом шаге $O(N^2) \to O(N)$. Это критически важно для быстрой работы LLM.
+
+## 3. Scaling Laws
+
+Эмпирические законы масштабирования:
+- Зависимость Loss от количества параметров $N$ и размера датасета $D$.
+- **Chinchilla optimal**: для оптимального обучения размер модели и объем данных должны расти пропорционально. На 1 параметр $\approx 20$ токенов.
+- **Emergent abilities**: новые навыки модели (например, few-shot reasoning), которые появляются только при достижении определенного масштаба.
+
+## 4. RLHF и Alignment
+
+- **Reward Model**: обучается на человеческих предпочтениях (Human Preference Data).
+- **PPO для LLM**: Proximal Policy Optimization используется для тонкой настройки генератора (Policy) так, чтобы максимизировать Reward и не сильно отдаляться от базовой модели (через KL-дивергенцию).
+- **RLAIF**: использование других AI для разметки предпочтений вместо людей (AI Feedback).
+
+## 5. RAG (Retrieval-Augmented Generation)
+
+- Извлечение информации из внешней базы знаний для дополнения контекста LLM.
+- **Chunking**: нарезка текста на фрагменты (overlap, sentence splitting).
+- **Embedding similarity**: поиск ближайших фрагментов с помощью косинусного расстояния между векторами (например, через FAISS).
+
+## 6. Agents и Tool Use
+
+- **Function Calling**: модель обучена генерировать JSON-структуры с аргументами функций.
+- **ReAct framework (Reason + Act)**: модель пишет мысли (Thought), вызывает инструменты (Action), получает результат (Observation) и так по циклу.
+
+## 7. Практика
+
+В `transformers` от HuggingFace:
+- `pipeline("text-generation", model=...)`
+- Параметры `generate()`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.
+
+::: {.callout-tip title="Связь с семинаром и ДЗ"}
+- **Семинар** ([advanced](../../../seminars/tracks/nlp-llm/advanced.html)): реализация BPE и демонстрация KV-cache trick.
+- **ДЗ**: [nlp-llm](../../../homework/tracks/nlp-llm/README.qmd) — построить RAG систему и исследовать параметры retrieval.
+:::

@@ -1,0 +1,15 @@
+rag_pipeline:
+  weight: 30
+  description: "retrieval работает, embedding similarity посчитан верно"
+chunking_ablation:
+  weight: 25
+  description: "разные chunk_size проверены, объяснён эффект"
+quality_evaluation:
+  weight: 25
+  description: "есть метрика качества ответов (ROUGE, human eval, или LLM eval)"
+writeup:
+  weight: 20
+  description: "MODEL.md содержит конкретные примеры хороших/плохих ответов"
+red_flags:
+  - "no_retrieval_used"
+  - "chunk_size_not_varied"

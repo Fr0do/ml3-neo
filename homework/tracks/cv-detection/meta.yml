@@ -1,0 +1,9 @@
+type: both
+weight: 100
+leaderboard:
+  metric: map50
+  baseline: 0.20
+  full_credit: 0.55
+  metric_weight: 60
+judge:
+  weight: 40

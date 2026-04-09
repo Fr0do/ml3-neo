@@ -1,0 +1,71 @@
+# Открытый rubric для judge-режима ДЗ 08-generative.
+
+rubric:
+  total: 100
+
+  criteria:
+    - id: vae_correctness
+      label: "Корректность VAE"
+      weight: 25
+      description: |
+        Модель должна быть именно VAE (наличие KL-divergence и reparameterization trick),
+        а не просто детерминированным Autoencoder'ом.
+      anchors:
+        25: "ELBO посчитан верно, reparam trick использован корректно."
+        10: "Есть ошибки в формуле ELBO или лоссах, но идея понятна."
+        0:  "Обычный Autoencoder вместо VAE или грубые математические ошибки."
+
+    - id: latent_space_analysis
+      label: "Анализ латентного пространства"
+      weight: 30
+      description: |
+        Продемонстрировано понимание выученных репрезентаций: 2D визуализация,
+        интерполяция между точками, анализ того, что кодируют различные направления.
+      anchors:
+        30: "Есть качественная 2D визуализация, сферическая интерполяция, детальный разбор."
+        15: "Визуализация есть, но без выводов или интерполяций."
+        0:  "Латентное пространство не исследовано."
+
+    - id: beta_ablation
+      label: "Beta ablation (beta-VAE)"
+      weight: 20
+      description: |
+        Студент проверил разные значения веса KL-члена ($\beta$) и объяснил
+        trade-off между reconstruction quality и disentanglement/prior matching.
+      anchors:
+        20: "Проверены разные $\beta$, чётко описан trade-off с примерами."
+        10: "Проверено, но выводы поверхностные."
+        0:  "Абляции по параметру $\beta$ нет."
+
+    - id: generalization
+      label: "Генерализация"
+      weight: 15
+      description: |
+        Проверено качество реконструкции (или ELBO) на отложенной выборке,
+        чтобы доказать отсутствие оверфиттинга.
+      anchors:
+        15: "Метрики посчитаны на валидации/тесте."
+        0:  "Тестирование только на train data."
+
+    - id: writeup
+      label: "Качество MODEL.md"
+      weight: 10
+      description: |
+        Отчёт содержит конкретные числа, ELBO значения, примеры сгенерированных картинок.
+      anchors:
+        10: "MODEL.md содержательный, аккуратный, с графиками и цифрами."
+        5:  "Текст есть, но без конкретных чисел и метрик."
+        0:  "Отчёт пуст или неинформативен."
+
+  red_flags:
+    - "autoencoder_without_kl"
+    - "no_latent_visualization"
+
+  output_format: |
+    Верни строго JSON следующего вида:
+    {
+      "scores": { "<criterion_id>": <number>, ... },
+      "comments": { "<criterion_id>": "<краткое объяснение оценки>", ... },
+      "red_flags_triggered": ["..."],
+      "total": <number>
+    }

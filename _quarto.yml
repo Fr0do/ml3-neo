@@ -38,16 +38,45 @@ website:
         text: Как учиться
       - text: Лекции
         menu:
-          - lectures/04-cnn/lecture.qmd
-      - text: Семинары
-        menu:
-          - text: "04 — CNN (basic)"
-            href: seminars/04-cnn/basic.html
-          - text: "04 — CNN (advanced)"
-            href: seminars/04-cnn/advanced.html
+          - text: "01 — Backprop & Autograd"
+            href: lectures/01-backprop/lecture.html
+          - text: "02 — PyTorch Fundamentals"
+            href: lectures/02-pytorch/lecture.html
+          - text: "03 — MLP & Normalization"
+            href: lectures/03-mlp-norm/lecture.html
+          - text: "04 — CNNs"
+            href: lectures/04-cnn/lecture.html
+          - text: "05 — Sequence Models"
+            href: lectures/05-sequence/lecture.html
+          - text: "06 — Transformer"
+            href: lectures/06-transformer/lecture.html
+          - text: "07 — Pre-training & Fine-tuning"
+            href: lectures/07-pretrain/lecture.html
+          - text: "08 — Generative Intro"
+            href: lectures/08-generative/lecture.html
+          - text: "---"
+          - text: "Track: CV Detection"
+            href: lectures/tracks/cv-detection/lecture.html
+          - text: "Track: NLP & LLMs"
+            href: lectures/tracks/nlp-llm/lecture.html
+          - text: "Track: Efficient ML"
+            href: lectures/tracks/efficient/lecture.html
+          - text: "Track: Generative (deep)"
+            href: lectures/tracks/generative/lecture.html
+          - text: "Track: Graphs & KAN"
+            href: lectures/tracks/graphs/lecture.html
+          - text: "Track: RL"
+            href: lectures/tracks/rl/lecture.html
       - text: Домашки
         menu:
+          - homework/01-backprop/README.qmd
+          - homework/02-pytorch/README.qmd
+          - homework/03-mlp-norm/README.qmd
           - homework/04-cnn-zoo/README.qmd
+          - homework/05-sequence/README.qmd
+          - homework/06-transformer/README.qmd
+          - homework/07-pretrain/README.qmd
+          - homework/08-generative/README.qmd
       - href: leaderboards.qmd
         text: Leaderboards
     right:
@@ -62,9 +91,22 @@ website:
       contents:
         - section: "Core"
           contents:
+            - lectures/01-backprop/lecture.qmd
+            - lectures/02-pytorch/lecture.qmd
+            - lectures/03-mlp-norm/lecture.qmd
             - lectures/04-cnn/lecture.qmd
-        - section: "Tracks"
-          contents: []
+            - lectures/05-sequence/lecture.qmd
+            - lectures/06-transformer/lecture.qmd
+            - lectures/07-pretrain/lecture.qmd
+            - lectures/08-generative/lecture.qmd
+        - section: "Optional Tracks"
+          contents:
+            - lectures/tracks/cv-detection/lecture.qmd
+            - lectures/tracks/nlp-llm/lecture.qmd
+            - lectures/tracks/efficient/lecture.qmd
+            - lectures/tracks/generative/lecture.qmd
+            - lectures/tracks/graphs/lecture.qmd
+            - lectures/tracks/rl/lecture.qmd
   page-footer:
     left: "© 2026 ml3-neo · CC-BY-SA"
     right: "Сделано с Quarto + Marimo"

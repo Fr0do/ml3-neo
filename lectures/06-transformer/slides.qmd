@@ -1,0 +1,79 @@
+---
+title: "Transformer deep dive"
+format: revealjs
+---
+
+# Transformer deep dive
+
+## Мотивация
+
+- **RNN**: $h_t = f(h_{t-1}, x_t)$ — строгая последовательность, нет распараллеливания.
+- **Transformer**: Механизм внимания позволяет смотреть на всю последовательность разом ($O(n^2)$ параллельно).
+
+## Scaled Dot-Product Attention
+
+Идея из информационного поиска (Retrieval):
+
+- **Query (Q)**: Что я ищу?
+- **Key (K)**: Что я описываю?
+- **Value (V)**: Содержание.
+
+$$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
+
+## Scaled Dot-Product Attention (Диаграмма)
+
+```text
+       Q       K
+        \     /
+         MatMul
+           |
+         Scale
+           |
+          Mask (opt)
+           |
+        Softmax
+           |       V
+            \     /
+             MatMul
+               |
+             Output
+```
+
+## Multi-Head Attention
+
+Разные "головы" обращают внимание на разные аспекты (синтаксис, семантика, ссылки на местоимения).
+
+$$ \text{MultiHead} = \text{Concat}(\text{head}_1, \dots, \text{head}_h)W^O $$
+
+## Transformer Encoder Block
+
+Схема с **Pre-LN** (современный стандарт):
+
+```text
+       Input
+         |----------------\
+     LayerNorm            |
+         |                |
+ Multi-Head Attention     |
+         |                |
+        Add <-------------/
+         |
+         |----------------\
+     LayerNorm            |
+         |                |
+ Feed Forward (MLP)       |
+         |                |
+        Add <-------------/
+         |
+      Output
+```
+
+## BERT vs GPT
+
+- **BERT (Encoder)**: Видит всё в обе стороны (Bidirectional). Маскируем часть слов, предсказываем их (MLM). [CLS] токен для классификации.
+- **GPT (Decoder)**: Каузальная маска. Видит только прошлое. Авторегрессионная генерация (Predict next token).
+
+## Масштабирование
+
+- **Умное внимание:** Flash Attention (GPU memory IO-aware), Sliding Window.
+- **Emergent Abilities:** Больше параметров и данных = новые способности модели без явного обучения (in-context learning).

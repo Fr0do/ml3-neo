@@ -1,0 +1,9 @@
+---
+title: "Graphs & KAN"
+format: revealjs
+---
+
+## GNN & KAN
+- Графы и Message Passing
+- GCN, GAT, GraphSAGE
+- KAN: Learnable activations на рёбрах

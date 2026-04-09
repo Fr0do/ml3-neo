@@ -1,0 +1,10 @@
+---
+title: "Efficient ML"
+format: revealjs
+---
+
+## Efficient ML
+- Квантизация (INT8, INT4)
+- Knowledge Distillation
+- Pruning
+- SSMs (Mamba)

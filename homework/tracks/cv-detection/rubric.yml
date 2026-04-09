@@ -1,0 +1,12 @@
+detector_understanding:
+  weight: 20
+  description: "Студент объясняет anchor design decisions."
+nms_analysis:
+  weight: 10
+  description: "Показан эффект NMS threshold."
+error_analysis:
+  weight: 10
+  description: "FP vs FN analysis, confusion по классам."
+red_flags:
+  - "no_nms_applied"
+  - "metric_not_computed_correctly"

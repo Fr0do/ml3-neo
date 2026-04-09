@@ -1,0 +1,10 @@
+---
+title: "RL: Policy Gradients & RLHF"
+format: revealjs
+---
+
+## RL Basics
+- MDP формализм
+- REINFORCE, Actor-Critic
+- PPO, RLHF
+- RL vs DL

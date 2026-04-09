@@ -1,0 +1,8 @@
+---
+title: "Homework: Efficient ML"
+---
+
+# Задание
+Выбрать pretrained модель и применить как минимум 2 техники (на выбор: quantization + distillation или quantization + pruning). 
+
+Требуется задокументировать pareto frontier (quality vs size) в writeup.
