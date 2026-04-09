@@ -45,7 +45,7 @@ jobs:
           locked: false   # pixi.lock пересоздаётся при обновлении pixi.toml
 
       - name: Install course environment
-        run: pixi install --no-lockfile-update
+        run: pixi install
 
       - name: Render TikZ figures
         run: pixi run tikz-all
