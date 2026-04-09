@@ -1,46 +1,436 @@
 ---
-title: "Лекция Efficient — Efficient ML"
-subtitle: "Квантизация, дистилляция, SSMs"
-author: "ml3-neo"
+title: "Efficient ML"
+subtitle: "Optional Track: квантизация, дистилляция, Flash Attention, SSMs/Mamba"
 date: last-modified
 bibliography: ../../../refs.bib
 format:
   html:
+    toc: true
+    toc-depth: 3
     code-fold: false
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это optional track по Efficient ML. Предполагается знание архитектуры Transformer и базовых принципов обучения сетей.
+Это **optional track** по эффективному ML. Предполагается знание архитектуры Transformer и базовых принципов обучения. Трек ~55 минут.
 :::
 
-## 1. Мотивация
+## 1. Зачем нужна эффективность
 
-Большие модели (LLM, ViT) требуют огромных вычислительных ресурсов. Чтобы запускать их на потребительском железе и ускорять инференс, мы используем методы сжатия моделей и альтернативные архитектуры.
+Рост размеров моделей опережает рост памяти GPU:
 
-## 2. Квантизация (Quantization)
+| Модель | Параметры | FP16 RAM | A100 80GB |
+|--------|-----------|---------|-----------|
+| GPT-2 | 117M | 0.2 GB | 1× |
+| GPT-3 | 175B | 350 GB | ~4–5× A100 |
+| Llama-3 70B | 70B | 140 GB | 2× A100 |
+| GPT-4 (est.) | ~1.8T | 3600 GB | ~45× A100 |
 
-Перевод весов и активаций из FP32/FP16 в форматы с меньшей разрядностью (INT8, INT4).
-- **PTQ (Post-Training Quantization)**: квантизация уже обученной модели. 
-- **QAT (Quantization-Aware Training)**: симуляция квантизации во время обучения.
+**Трейдоффы в efficient ML:**
 
-Алгоритм LLM.int8() (и GPTQ) позволяет сжать веса до 8 или 4 бит, минимизируя деградацию качества с помощью выделения outlier-ов и умного округления:
-$$ W_{q} = \text{round}\left( \frac{W}{S} \right) + Z $$
-Где $S$ (scale) и $Z$ (zero-point) — параметры квантизации (absmax).
+- **FLOP ↔ Latency**: меньше операций → быстрее, но accuracy может упасть
+- **Параметры ↔ Память**: меньше параметров → меньше VRAM, но снижается capacity
+- **Precision ↔ Accuracy**: ниже битность → меньше RAM и FLOP, возможна деградация
+- **Throughput ↔ Latency**: батчинг повышает throughput, но увеличивает latency одного запроса
 
-## 3. Дистилляция и Pruning
+Области эффективного ML:
 
-- **Knowledge Distillation**: обучение маленькой модели (student) на выходах (soft labels) большой модели (teacher) с использованием температуры $T$.
-- **Pruning**: удаление части весов (magnitude-based). Structured pruning удаляет целые каналы/головы, unstructured — отдельные веса.
+1. **Квантизация** — снижение битности представления
+2. **Дистилляция** — перенос знаний из большой модели в малую
+3. **Pruning** — обнуление незначимых весов
+4. **Архитектурные инновации** — Flash Attention, SSM/Mamba
+5. **Компиляция** — `torch.compile`, TensorRT, ONNX
 
-## 4. State Space Models (SSMs)
+---
 
-Mamba и другие SSMs предлагают альтернативу attention-механизму. Они используют селективные пространства состояний (selective state spaces), что позволяет получить линейную сложность $O(N)$ от длины контекста в отличие от $O(N^2)$ в Transformer, сохраняя при этом качество.
+## 2. Квантизация
 
-## 5. Практика и инструменты
+### 2.1 Основная идея
 
-Используются библиотеки: `torch.quantization`, HuggingFace `optimum`, `bitsandbytes` (для llm.int8).
+Заменяем веса и/или активации с высокой точности (FP32/FP16) на меньшую битность (INT8, INT4):
+
+$$W_q = \text{round}\!\left(\frac{W - Z}{S}\right) \in \{-2^{b-1}, \ldots, 2^{b-1}-1\}$$
+
+Параметры:
+
+- $S$ (scale) — размер кванта: $S = \frac{\max|W|}{2^{b-1}}$ для absmax квантизации
+- $Z$ (zero-point) — смещение для асимметричных диапазонов
+
+Обратное преобразование (dequantization): $W_\text{approx} = S \cdot W_q + Z$
+
+Матричное умножение: $Y = X \cdot W \approx (S_X X_q)(S_W W_q)$ — считаем в integer, затем масштабируем.
+
+### 2.2 PTQ vs QAT
+
+**PTQ (Post-Training Quantization)**: квантизуем уже обученную модель. Просто и быстро, но accuracy может упасть для INT4 без калибровки.
+
+**QAT (Quantization-Aware Training)**: симулируем квантизацию во время обучения через **straight-through estimator**:
+
+$$\hat{W} = W + \text{sg}(\text{round}(\ldots) - W)$$
+
+Градиент проходит через операцию округления как будто она тождественная (stop-gradient). Качество лучше PTQ, но нужно дообучение.
+
+### 2.3 LLM.int8() (bitsandbytes)
+
+Dettmers et al. (2022). Ключевое наблюдение: в активациях LLM есть **outlier-ы** — ~0.1% признаков с очень большой магнитудой, которые сильно искажаются при INT8.
+
+Решение — **смешанная точность**:
+
+1. Найти "outlier" колонки в $X$ (порог: $|\alpha| > 6$)
+2. Outlier-части вычислять в FP16
+3. Остальное — в INT8
+
+```python
+# bitsandbytes: автоматически применяет LLM.int8()
+from transformers import AutoModelForCausalLM
+import torch
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-8B",
+    load_in_8bit=True,
+    device_map="auto",
+)
+# ~8GB вместо ~16GB для bfloat16
+```
+
+### 2.4 NF4 и QLoRA
+
+**NF4 (Normal Float 4)** — 4-битный формат, оптимизированный для весов, распределённых нормально.
+Квантовые уровни расставлены по квантилям нормального распределения, а не равномерно.
+
+**QLoRA** (Dettmers et al., 2023): дообучение (LoRA) поверх NF4-квантизованной модели.
+Оригинальные веса заморожены в 4 битах, LoRA-адаптеры — в BF16.
+
+```python
+from transformers import BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
+model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config)
+
+lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"])
+model = get_peft_model(model, lora_config)
+```
+
+### 2.5 GPTQ и AWQ
+
+**GPTQ** (Frantar et al., 2022): post-training INT4 квантизация с минимальными потерями.
+
+Идея: минимизируем ошибку слой за слоем:
+
+$$\arg\min_{\hat{W}} \left\| WX - \hat{W}X \right\|^2_F$$
+
+Используем второй порядок (Hessian) для нахождения оптимального округления.
+Каждый вес квантизуется с компенсацией ошибок через Cholesky-факторизацию Hessian.
+
+**AWQ** (Lin et al., 2023): Activation-aware Weight Quantization.
+Масштабирует каналы весов перед квантизацией, защищая каналы с большими активациями (важные) от потерь точности.
+
+---
+
+## 3. Knowledge Distillation
+
+### 3.1 Soft Targets с температурой
+
+Hinton et al. (2015). Обучаем student-модель не только на hard labels (one-hot),
+но и на **soft outputs** teacher-модели — они несут информацию о «близости» классов.
+
+$$\mathcal{L}_\text{KD} = (1-\alpha)\,\mathcal{L}_\text{CE}(y, \hat{p}_S) + \alpha\,T^2\,\text{KL}\!\left(\sigma\!\left(\frac{z_T}{T}\right) \Big\| \sigma\!\left(\frac{z_S}{T}\right)\right)$$
+
+где $z_T, z_S$ — logits teacher и student, $T$ — температура, $\alpha$ — баланс, $\sigma$ — softmax.
+
+**Зачем температура?** При $T=1$ softmax почти one-hot. При $T>1$ распределение сглаживается —
+видны «вторичные» классы, несущие информацию о структуре данных.
+
+```python
+import torch.nn.functional as F
+
+def distillation_loss(student_logits, teacher_logits, targets, T=4.0, alpha=0.7):
+    # Жёсткие метки
+    ce_loss = F.cross_entropy(student_logits, targets)
+    # Мягкие метки от учителя
+    student_soft = F.log_softmax(student_logits / T, dim=-1)
+    teacher_soft = F.softmax(teacher_logits / T, dim=-1)
+    kd_loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (T ** 2)
+    return (1 - alpha) * ce_loss + alpha * kd_loss
+```
+
+### 3.2 Feature Distillation
+
+Вместо (или вместе с) финальными логитами — дистиллируем промежуточные представления:
+
+$$\mathcal{L}_\text{feat} = \left\| f_T(x) - g(f_S(x)) \right\|^2$$
+
+где $g$ — проекционный слой (адаптер размерности), $f_T, f_S$ — feature map teacher и student.
+
+### 3.3 TinyBERT
+
+Jiao et al. (2019). Дистилляция BERT в 4× меньшую модель с потерей только ~5% качества на GLUE.
+
+Дистиллирует одновременно:
+
+1. **Embedding layer outputs**
+2. **Attention maps**: $\text{MSE}(A^T_h, A^S_h)$ для каждой attention head
+3. **Hidden states**: $\text{MSE}(H^T, W_h H^S)$
+4. **Prediction layer**: KL-divergence softmax outputs
+
+Результат: BERT-4L × 312d (14.5M параметров) vs BERT-Base (110M) — 96.8% качества при 9.4× ускорении.
+
+---
+
+## 4. Pruning
+
+### 4.1 Magnitude-based Pruning
+
+Простейший метод: обнуляем веса с наименьшей абсолютной величиной.
+
+```python
+import torch.nn.utils.prune as prune
+
+# Unstructured pruning: 30% наименьших весов -> 0
+prune.l1_unstructured(model.fc1, name='weight', amount=0.3)
+
+# Structured: удаляем 20% каналов по L2 норме
+prune.ln_structured(model.conv1, name='weight', amount=0.2, n=2, dim=0)
+
+# После обучения с маской - убираем маску, делаем нули реальными
+prune.remove(model.fc1, 'weight')
+```
+
+### 4.2 Structured vs Unstructured
+
+**Unstructured (нерегулярное)**: обнуляем произвольные веса. Высокое сжатие (~90%),
+но GPU не умеет эффективно работать со sparse матрицами — без специального железа реального ускорения нет.
+
+**Structured**: удаляем целые каналы, фильтры, головы attention.
+Матрицы остаются плотными, GPU ускоряется реально.
+
+| Тип | Простота | Сжатие | Реальное ускорение |
+|-----|----------|--------|-------------------|
+| Unstructured | высокая | ~90% | Нет (без sparse hw) |
+| Structured channels | средняя | ~50% | Да |
+| Structured heads | средняя | ~30-50% | Да |
+| Block-sparse | низкая | ~70% | Только на A100 |
+
+### 4.3 Lottery Ticket Hypothesis
+
+Frankle & Carlin (2019). Гипотеза: в случайно инициализированной нейросети существует **подсеть**
+("winning ticket"), которая при обучении с той же инициализацией достигает сравнимого качества с исходной.
+
+**Iterative Magnitude Pruning:**
+
+1. Инициализировать модель $\theta_0$
+2. Обучить → $\theta_j$
+3. Удалить $p\%$ наименьших весов, создав маску $m$
+4. Сбросить оставшиеся веса к $\theta_0 \odot m$
+5. Повторить
+
+Результат: выигрышные подсети достигают качества полной модели при 90% sparsity.
+
+---
+
+## 5. Flash Attention
+
+### 5.1 Проблема стандартного Attention
+
+Стандартный self-attention: $\text{Attn}(Q,K,V) = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d}}\right)V$
+
+Матрица $QK^T \in \mathbb{R}^{N \times N}$ (для $N$ токенов):
+
+- **Вычислительная сложность**: $O(N^2 d)$ FLOP
+- **Память**: $O(N^2)$ для хранения матрицы attention
+
+При $N = 16384$ и $d = 64$: матрица attention занимает $\approx 1\,\text{GB}$ — чисто для временного хранения.
+IO стал узким местом, не вычисления.
+
+### 5.2 IO-Complexity и Memory Hierarchy
+
+Модель памяти GPU:
+
+- **HBM (GPU DRAM)**: 40–80 GB, ~2 TB/s bandwidth
+- **SRAM (on-chip cache)**: ~20 MB, ~19 TB/s bandwidth — в **10× быстрее**
+
+Стандартный attention делает $O(N^2)$ операций чтения/записи в HBM (materialize матрицы $S = QK^T$).
+
+**Цель Flash Attention**: вычислить тот же результат, **не материализуя** матрицу $N \times N$ в HBM.
+
+### 5.3 Tiling + Online Softmax
+
+Ключевые идеи Flash Attention (Dao et al., 2022):
+
+1. **Tiling**: делим $Q, K, V$ на блоки, загружаем в SRAM по очереди
+2. **Online softmax**: вычисляем numerically stable softmax инкрементально
+
+Инкрементальный softmax (обновление на каждом блоке):
+
+$$m_\text{new} = \max(m_\text{old},\; \text{rowmax}(S_\text{block}))$$
+
+$$\ell_\text{new} = e^{m_\text{old} - m_\text{new}} \cdot \ell_\text{old} + \text{rowsum}(e^{S_\text{block} - m_\text{new}})$$
+
+$$O_\text{new} = \frac{e^{m_\text{old} - m_\text{new}} \cdot \ell_\text{old} \cdot O_\text{old} + e^{S_\text{block} - m_\text{new}} V_\text{block}}{\ell_\text{new}}$$
+
+Математически эквивалентно полному softmax, но без хранения полной матрицы.
+
+**Результаты:**
+
+- Flash Attention v1 (2022): 2-4× ускорение, memory $O(N)$ вместо $O(N^2)$
+- Flash Attention v2 (2023): разбиение по query, 2× быстрее FA1
+- Flash Attention v3 (2024): асинхронный warp-level пайплайн на H100, ~2× быстрее FA2
+
+```python
+# PyTorch 2.0+ имеет встроенный Flash Attention через SDPA
+import torch, torch.nn.functional as F
+
+Q = torch.randn(2, 8, 1024, 64, device='cuda', dtype=torch.float16)
+K = torch.randn(2, 8, 1024, 64, device='cuda', dtype=torch.float16)
+V = torch.randn(2, 8, 1024, 64, device='cuda', dtype=torch.float16)
+
+# Автоматически использует Flash Attention если доступен
+with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False):
+    out = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+```
+
+---
+
+## 6. SSMs и Mamba
+
+### 6.1 State Space Models: основы
+
+SSM — линейная система дифференциальных уравнений:
+
+$$\mathbf{h}'(t) = A\mathbf{h}(t) + B\mathbf{x}(t)$$
+$$\mathbf{y}(t)  = C\mathbf{h}(t) + D\mathbf{x}(t)$$
+
+где $\mathbf{h}(t) \in \mathbb{R}^N$ — скрытое состояние, $\mathbf{x}(t)$ — вход, $\mathbf{y}(t)$ — выход.
+
+Дискретизация (Zero-Order Hold) с шагом $\Delta$:
+
+$$\bar{A} = e^{\Delta A}, \quad \bar{B} = (e^{\Delta A} - I)A^{-1}B$$
+
+$$\mathbf{h}_k = \bar{A}\mathbf{h}_{k-1} + \bar{B}\mathbf{x}_k, \quad \mathbf{y}_k = C\mathbf{h}_k$$
+
+**Два режима вычисления:**
+
+- **Рекуррентный** (inference): $O(N)$ состояние — очень быстро, не растёт с длиной
+- **Свёрточный** (training): глобальная свёртка параллелизуется через FFT — $O(L \log L)$
+
+### 6.2 Mamba: Selective SSM (S6)
+
+Gu & Dao (2023). Проблема S4: параметры $A, B, C, \Delta$ **не зависят от входа** — нет content-based reasoning.
+
+Mamba делает параметры **функцией входа** (Selective SSM):
+
+$$B_t = \text{Linear}_B(x_t), \quad C_t = \text{Linear}_C(x_t), \quad \Delta_t = \text{softplus}(\text{Linear}_\Delta(x_t))$$
+
+Это позволяет модели **избирательно** пропускать или запоминать информацию — как attention, но $O(1)$ по памяти при инференсе.
+
+**Проблема**: input-зависимые $\Delta$ нельзя свернуть через FFT. Решение — **hardware-aware parallel scan** (параллельный prefix scan на GPU).
+
+### 6.3 Mamba Block
+
+```
+Input x
+  ├── Conv1d → SiLU → SSM (selective B, C, Δ от x)
+  └── SiLU (gate)
+  ↓
+Elementwise multiply (SSM output × gate)
+  ↓
+Linear projection + residual
+```
+
+### 6.4 Сравнение с Transformer
+
+| Характеристика | Transformer | Mamba |
+|---------------|-------------|-------|
+| Training complexity | $O(L^2)$ / $O(L \log L)$ с FA | $O(L \log L)$ parallel scan |
+| Inference memory | $O(L \cdot d)$ KV-cache | $O(N \cdot d)$ фиксированное |
+| Длинный контекст | Квадратичный рост KV | Константа |
+| Selective recall | Прямой (attention matrix) | Через Δ-gate |
+
+Mamba-3B сравнивается с Transformer того же размера при **5× большем throughput** инференса.
+
+```python
+# pip install mamba-ssm
+from mamba_ssm import Mamba
+import torch
+
+layer = Mamba(d_model=256, d_state=16, d_conv=4, expand=2).cuda()
+x = torch.randn(2, 512, 256, device='cuda')  # [batch, seq, dim]
+y = layer(x)   # [2, 512, 256], O(seq) memory
+```
+
+---
+
+## 7. torch.compile и практические инструменты
+
+### 7.1 torch.compile
+
+PyTorch 2.0+ — JIT-компиляция вычислительного графа:
+
+```python
+import torch
+
+model = MyModel().cuda()
+model_compiled = torch.compile(model, mode="reduce-overhead")
+
+with torch.no_grad():
+    out = model_compiled(x)
+```
+
+Режимы `mode`:
+
+- `"default"` — баланс скорости компиляции и выполнения
+- `"reduce-overhead"` — минимизация Python overhead, хорошо для малых батчей
+- `"max-autotune"` — максимальная скорость, долгая первая компиляция
+
+Внутри: Dynamo (трассировка Python) → AOT Autograd → Inductor → Triton kernels.
+
+### 7.2 Статическая квантизация (torch.quantization)
+
+```python
+import torch.quantization as quant
+
+model.eval()
+model.qconfig = quant.get_default_qconfig('fbgemm')  # для CPU x86
+quant.prepare(model, inplace=True)
+
+# Калибровка (прогон нескольких батчей для сбора статистики)
+with torch.no_grad():
+    for batch in calibration_loader:
+        model(batch)
+
+quant.convert(model, inplace=True)
+# Linear слои заменены на quantized версии
+```
+
+### 7.3 Типичный пайплайн сжатия LLM
+
+```
+Pretrained LLM (FP16)
+    ↓ QLoRA fine-tuning (4bit NF4 + LoRA adapters)
+    ↓ Merge LoRA weights
+    ↓ GPTQ quantization (INT4, 128 group size)
+    ↓ torch.compile
+    ↓ Deploy with vLLM
+```
+
+---
+
+## Итоги
+
+1. **Квантизация**: PTQ прост, QAT лучше; INT8 (LLM.int8), INT4 (GPTQ, AWQ, NF4/QLoRA) — стандарт для LLM
+2. **Дистилляция**: soft targets с температурой передают структуру данных; feature distillation (attention maps) ещё эффективнее; TinyBERT — пример
+3. **Pruning**: unstructured даёт больше сжатия, structured — реальное ускорение; lottery ticket объясняет почему это работает
+4. **Flash Attention**: tiling + online softmax → $O(N)$ IO вместо $O(N^2)$; встроен в PyTorch 2.0 через SDPA
+5. **Mamba/SSM**: selective state spaces → линейная память при инференсе; hardware-aware parallel scan при обучении
+
+---
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар**: [advanced](../../../seminars/tracks/efficient/advanced.html) — квантизация ResNet-18 в INT8.
-- **ДЗ**: [efficient](../../../homework/tracks/efficient/README.qmd) — применение 2+ техник сжатия и построение Pareto frontier.
+- **Семинар** ([advanced](../../../seminars/tracks/efficient/advanced.html)): квантизация ResNet-18 в INT8, сравнение latency и accuracy; дистилляция BERT → student на SST-2.
+- **ДЗ**: [efficient](../../../homework/tracks/efficient/README.qmd) — применить 2+ техники сжатия и построить Pareto frontier accuracy vs latency.
 :::

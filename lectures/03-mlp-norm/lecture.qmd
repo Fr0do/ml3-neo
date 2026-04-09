@@ -7,82 +7,961 @@ bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **третий core-модуль**. Мы переходим от базового введения в DL к построению реальных архитектур. Разберёмся, почему глубокие сети лучше широких, как их регуляризовать и, главное, как нормализовывать промежуточные представления.
+Это **третий core-модуль**. Мы переходим от базового введения в DL к построению реальных архитектур. Разберёмся, почему глубокие сети лучше широких, как правильно инициализировать веса, почему градиенты «умирают» или «взрываются», как регуляризовать модели и — главное — как нормализовывать промежуточные представления. Финальная часть: RMSNorm и его роль в современных LLM.
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/03-mlp-norm/basic.html){.active} · [advanced](../../seminars/03-mlp-norm/advanced.html)
 :::
 
-## 1. Многослойный перцептрон (MLP)
+---
 
-### Universal approximation theorem
-Многослойный перцептрон с хотя бы одним скрытым слоем и нелинейной функцией активации (например, ReLU или Sigmoid) способен аппроксимировать любую непрерывную функцию с любой наперёд заданной точностью. 
+## 1. Анатомия MLP
 
-Интуиция: скрытые нейроны могут действовать как индикаторы локальных областей, а выходной слой комбинирует их в сложную функцию. 
+### 1.1 Что такое MLP
 
-**Ограничения**: теорема говорит о существовании таких весов, но не гарантирует, что градиентный спуск сможет их найти, или что ширина этого скрытого слоя не будет экспоненциально большой.
+**Многослойный перцептрон** (Multi-Layer Perceptron, MLP) — базовый строительный блок глубокого обучения. Формально это функция вида:
 
-### Глубина vs ширина
-Почему на практике мы строим глубокие сети, а не бесконечно широкие? Глубокие сети могут представлять композиционные функции гораздо компактнее (с меньшим числом параметров). Каждый новый слой оперирует уже извлечёнными признаками предыдущего слоя, создавая иерархию (от простых линий к сложным концептам), что делает обучение более эффективным и улучшает обобщение.
-
-## 2. Инициализация весов
-
-Случайная инициализация критична для backpropagation. Если все веса инициализировать нулями, все нейроны в слое будут вычислять одно и то же и получать одинаковые градиенты.
-
-- **Xavier/Glorot Initialization**: Поддерживает дисперсию активаций и градиентов постоянной между слоями. Хорошо работает с симметричными активациями (Tanh, Sigmoid). $\text{Var}(W) = \frac{2}{n_{\text{in}} + n_{\text{out}}}$.
-- **He/Kaiming Initialization**: Адаптирована для несимметричных активаций вроде ReLU, которые обнуляют половину входов. $\text{Var}(W) = \frac{2}{n_{\text{in}}}$.
-
-## 3. Регуляризация
-
-- **L1/L2 (Weight Decay)**: Добавление штрафа за большие веса к функции потерь. L2 штрафует крупные веса сильнее, L1 способствует разреженности (sparsity). В PyTorch L2 часто реализована как параметр `weight_decay` в оптимизаторе.
-- **Dropout**: Случайное зануление нейронов с вероятностью $p$ при обучении. Предотвращает коадаптацию нейронов. При инференсе (в режиме eval) все нейроны активны, но их выходы масштабируются (или используется *inverted dropout* при обучении: масштабирование на $1/(1-p)$ сразу при тренировке, чтобы на инференсе ничего не менять).
-- **DropPath (Stochastic Depth)**: Аналог Dropout, но отключает не отдельные нейроны, а целые ветки/блоки (например, в residual соединениях).
-
-## 4. Нормализации: BN, LN, IN, GN, RMSNorm
-
-Глубокие сети страдают от нестабильности распределения активаций (Internal Covariate Shift). Решение — нормализовать эти представления внутри сети. Общая формула нормализации (без центрирования в некоторых случаях):
 $$
-\hat{x} = \frac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}, \qquad
-y = \gamma \hat{x} + \beta.
+f(x) = W_L \circ \sigma \circ W_{L-1} \circ \sigma \circ \cdots \circ \sigma \circ W_1(x)
 $$
-Здесь $\gamma$ и $\beta$ — обучаемые параметры масштаба и сдвига. Различие между методами заключается в том, **по какой оси** усредняются $\mu$ и $\sigma$.
 
-![Нормализации: BN, LN, IN, GN, RMSNorm](../../figures/tikz/_build/normalization.svg){#fig-norm width=100%}
+где $W_i \in \mathbb{R}^{d_{i} \times d_{i-1}}$ — матрица весов $i$-го слоя, $\sigma$ — нелинейная функция активации, применяемая поэлементно.
 
-| Норма | $\mu$ берётся по | Где живёт |
-|-------|------------------|-----------|
-| **BatchNorm** | Batch size ($N$), пространству ($H, W$) для каждого канала $C$ | CNN, классика |
-| **LayerNorm** | Каналам ($C$) и пространству ($H, W$) для каждого примера $N$ | Transformer, RNN |
-| **InstanceNorm** | Пространству ($H, W$) для каждой пары $(N, C)$ отдельно | Style transfer, GANs |
-| **GroupNorm** | Пространству ($H, W$) и группам каналов $G$ | Детекция, малые батчи |
-| **RMSNorm** | Без $\mu$ (только среднеквадратичное по $C$) | LLaMA, современные LLM |
+Один слой выглядит так:
 
-### Особенности методов:
-- **BatchNorm**: Использует running stats (скользящее среднее) во время инференса. Из-за этого поведение на train и eval **разное**. Критически зависит от размера батча: при малых батчах (1-4) статистика шумит, и BN ломает обучение.
-- **LayerNorm**: Стабильна при любом batch size, так как статистика считается для каждого примера независимо. `GroupNorm(1) = LayerNorm` (если пространство $H, W$ тоже усредняется).
-- **InstanceNorm**: Полезна, когда контраст каждого отдельного изображения/признака не важен (например, при переносе стиля). `GroupNorm(C) = InstanceNorm`.
-- **GroupNorm**: Компромисс между BN и LN. Если батч маленький, но нужна поканальная нормализация, каналы бьются на группы.
-- **RMSNorm**: Оптимизация LayerNorm. Убирает центрирование (не вычитает $\mu$), оставляя только масштабирование (Root Mean Square). Это вычислительно эффективнее и работает не хуже в глубоких трансформерах.
+$$
+\mathbf{h}^{(l)} = \sigma\!\left(W^{(l)}\,\mathbf{h}^{(l-1)} + \mathbf{b}^{(l)}\right)
+$$
 
-### Когда что применять
-- Свёрточные сети (CNN) + большой батч $\to$ **BatchNorm** или **GroupNorm**.
-- CNN + малый батч (детекция, сегментация) $\to$ **GroupNorm**.
-- Трансформеры, последовательности $\to$ **LayerNorm** или **RMSNorm**.
-- Генерация изображений (Style Transfer) $\to$ **InstanceNorm**.
+В PyTorch это буквально:
 
-## 5. Ablation guide: как проверять нормализации
+```python
+import torch
+import torch.nn as nn
 
-Выбор нормализации — это эмпирический вопрос. Для проведения *ablation study*:
-1. Зафиксируйте все гиперпараметры (learning rate, архитектуру, seed).
-2. Меняйте только **один** слой нормализации за раз (isolation).
-3. Следите не только за итоговой метрикой (Accuracy / AUC), но и за скоростью сходимости (train loss) и стабильностью (variance).
-4. Обязательно проверяйте качество в режиме `.eval()`, так как BN ведёт себя иначе на инференсе!
+class MLP(nn.Module):
+    def __init__(self, dims: list[int], act=nn.GELU()):
+        super().__init__()
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(act)
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+# Пример: 3-слойный MLP 784 -> 512 -> 256 -> 10
+model = MLP([784, 512, 256, 10])
+```
+
+### 1.2 Теорема об универсальной аппроксимации
+
+> **Теорема (Hornik, 1991):** Нейросеть с одним скрытым слоем достаточной ширины и непрерывной нелинейной активацией может аппроксимировать любую непрерывную функцию $f: \mathbb{R}^n \to \mathbb{R}$ с произвольной точностью $\varepsilon > 0$ на компакте.
+
+**Интуиция.** Скрытые нейроны с сигмоидными активациями могут работать как «ступенчатые» индикаторы областей. Линейная комбинация таких индикаторов воспроизводит любую форму функции.
+
+::: {.callout-warning title="Важные ограничения"}
+Теорема гарантирует **существование** весов, но не:
+
+- то, что градиентный спуск их найдёт;
+- то, что ширина будет разумной (может потребоваться экспоненциально много нейронов);
+- хорошее обобщение на новые данные.
+:::
+
+### 1.3 Глубина vs ширина
+
+Зачем строить **глубокие** сети вместо одного широкого слоя?
+
+**Аргумент компактности.** Функции с иерархической структурой (например, детекция объекта = детекция углов + рёбер + частей + объекта) могут быть представлены глубокой сетью полиномиального размера, но для одного слоя требуют экспоненциального числа нейронов.
+
+**Аргумент повторного использования признаков.** Каждый слой оперирует уже извлечёнными признаками предыдущего: пиксели → края → текстуры → части объектов → объекты.
+
+| Характеристика | Широкая (1 слой) | Глубокая ($L$ слоёв) |
+|---|---|---|
+| Параметров | $O(d_{\max})$ | $O(L \cdot d)$ |
+| Выразительность | Любая (при $d_{\max} \to \infty$) | Выше при фиксированных параметрах |
+| Оптимизация | Проще (выпуклее) | Сложнее, но практически лучше |
+| Иерархия признаков | Нет | Да |
+
+### 1.4 Функции активации
+
+Нелинейность — сердце нейросети. Без неё $L$ линейных слоёв коллапсируют в один.
+
+**ReLU** (Rectified Linear Unit):
+$$
+\text{ReLU}(x) = \max(0, x)
+$$
+
+Плюсы: простота, нет проблемы насыщения при $x > 0$, вычислительно дёшева.
+Минусы: «мёртвые нейроны» (dying ReLU) — нейрон с отрицательным преактивационным значением никогда не обновляется.
+
+**GELU** (Gaussian Error Linear Unit):
+$$
+\text{GELU}(x) = x \cdot \Phi(x) \approx x \cdot \sigma(1.702\,x)
+$$
+
+где $\Phi$ — функция нормального распределения. GELU является стохастической регуляризацией: нейрон «зануляется» с вероятностью $1 - \Phi(x)$. Используется в BERT, GPT, ViT.
+
+**SiLU / Swish**:
+$$
+\text{SiLU}(x) = x \cdot \sigma(x)
+$$
+
+«Самовентилируемая» активация. Используется в EfficientNet, LLaMA (вариант SwiGLU).
+
+**Mish**:
+$$
+\text{Mish}(x) = x \cdot \tanh(\text{softplus}(x)) = x \cdot \tanh\!\left(\ln(1 + e^x)\right)
+$$
+
+Гладкая, неограничена сверху, нет мёртвых нейронов. Применяется в YOLO v4+.
+
+```python
+import torch
+import torch.nn.functional as F
+
+x = torch.randn(4, 512)
+
+relu  = F.relu(x)
+gelu  = F.gelu(x)
+silu  = F.silu(x)
+mish  = F.mish(x)
+
+# Сравним среднее число нулей (dying neurons) на случайном входе
+for name, act in [("ReLU", relu), ("GELU", gelu), ("SiLU", silu)]:
+    frac_zero = (act == 0).float().mean().item()
+    print(f"{name}: {frac_zero:.2%} нулей")
+```
+
+::: {.callout-tip title="Практический совет"}
+- Для CNN — ReLU или LeakyReLU (быстро, стабильно).
+- Для Transformer — GELU (стандарт de facto) или SiLU.
+- Если видите dying ReLU — попробуйте GELU или уменьшите learning rate.
+:::
+
+---
+
+## 2. Проблема затухания и взрыва градиентов
+
+### 2.1 Интуиция
+
+При обратном распространении ошибки градиент проходит через все слои. Если в каждом слое он умножается на число $< 1$, то через $L$ слоёв градиент экспоненциально мал — **затухает**. Если на число $> 1$ — **взрывается**.
+
+### 2.2 Математика
+
+Рассмотрим сеть без активаций (для наглядности). Потеря $\mathcal{L}$, выход $L$-го слоя. Градиент для первого слоя:
+
+$$
+\frac{\partial \mathcal{L}}{\partial W_1} = \frac{\partial \mathcal{L}}{\partial h^{(L)}} \cdot W_L \cdot W_{L-1} \cdots W_2
+$$
+
+По правилу цепочки через произведение якобианов:
+
+$$
+\frac{\partial h^{(l)}}{\partial h^{(l-1)}} = W^{(l)} \cdot \text{diag}\!\left(\sigma'\!\left(z^{(l)}\right)\right)
+$$
+
+Градиент потери по активациям $l$-го слоя:
+
+$$
+\delta^{(l)} = \left(\prod_{k=l+1}^{L} W^{(k)\top} \cdot \text{diag}\!\left(\sigma'\!\left(z^{(k)}\right)\right)\right) \delta^{(L)}
+$$
+
+Если спектральная норма каждого $W^{(k)}$ равна $\lambda$, то $\|\delta^{(l)}\| \sim \lambda^{L-l}$:
+- $\lambda < 1$ → **затухание**: $\|\delta^{(1)}\| \approx 0$ при больших $L$
+- $\lambda > 1$ → **взрыв**: $\|\delta^{(1)}\| \to \infty$
+
+Для ReLU $\sigma'(z) \in \{0, 1\}$, что уже лучше Sigmoid ($\sigma'_{\max} = 0.25$), но проблема остаётся при плохой инициализации.
+
+### 2.3 Диагностика в практике
+
+```python
+import torch
+import torch.nn as nn
+
+def monitor_gradients(model, loss):
+    loss.backward()
+    grad_norms = []
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norms.append((name, param.grad.norm().item()))
+    return grad_norms
+
+# Пример: глубокая сеть без нормализации
+deep_net = nn.Sequential(*[
+    nn.Linear(256, 256) for _ in range(20)
+])
+x = torch.randn(32, 256)
+loss = deep_net(x).mean()
+norms = monitor_gradients(deep_net, loss)
+
+# Если нормы убывают экспоненциально — затухание градиентов
+for name, norm in norms[:5]:
+    print(f"{name}: {norm:.6f}")
+```
+
+### 2.4 Решения
+
+1. **Правильная инициализация** (следующий раздел)
+2. **Нормализация** (BatchNorm, LayerNorm — раздел 4)
+3. **Residual connections** (ResNet — лекция 04)
+4. **Gradient clipping**: ограничение нормы градиента
+
+```python
+# Gradient clipping — стандартная практика для RNN и Transformer
+optimizer.zero_grad()
+loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+optimizer.step()
+```
+
+---
+
+## 3. Инициализация весов
+
+### 3.1 Почему нули не работают
+
+Если $W^{(l)}_{ij} = 0$ для всех $i, j$, то все нейроны слоя вычисляют одно и то же, получают одинаковые градиенты и **никогда не разойдутся**. Это называется проблемой симметрии.
+
+Инициализация должна быть **случайной**, но с правильным масштабом.
+
+### 3.2 Что хотим сохранить
+
+Идеал: чтобы дисперсия активаций и градиентов **не менялась** при прохождении через слои. Это позволяет сигналу и градиенту распространяться без затухания или взрыва.
+
+Для линейного слоя $h = Wx$, если $W_{ij} \sim \mathcal{N}(0, \sigma^2)$ и $x_i$ независимы с нулевым средним и дисперсией $\text{Var}(x)$:
+
+$$
+\text{Var}(h_j) = n_{\text{in}} \cdot \sigma^2 \cdot \text{Var}(x)
+$$
+
+Чтобы $\text{Var}(h) = \text{Var}(x)$, нужно $\sigma^2 = \frac{1}{n_{\text{in}}}$.
+
+### 3.3 Xavier / Glorot инициализация
+
+Glorot & Bengio (2010) предложили балансировать прямой и обратный проходы одновременно:
+
+$$
+\text{Var}(W) = \frac{2}{n_{\text{in}} + n_{\text{out}}}
+$$
+
+Для равномерного распределения: $W \sim \mathcal{U}\!\left[-\sqrt{\frac{6}{n_{\text{in}} + n_{\text{out}}}},\; +\sqrt{\frac{6}{n_{\text{in}} + n_{\text{out}}}}\right]$
+
+Выводится из условия: $\text{Var}(\text{forward}) = 1$ и $\text{Var}(\text{backward}) = 1$ одновременно. Компромисс между ними — среднее гармоническое $n_{\text{in}}$ и $n_{\text{out}}$.
+
+**Когда применять:** симметричные активации с $\sigma'(0) \approx 1$ — Tanh, Sigmoid (на практике устаревшее), Linear.
+
+### 3.4 He / Kaiming инициализация
+
+ReLU «убивает» половину нейронов ($\sigma'(x) = 0$ при $x < 0$). Поэтому эффективная дисперсия уполовинивается. He et al. (2015) скомпенсировали это:
+
+$$
+\text{Var}(W) = \frac{2}{n_{\text{in}}}
+$$
+
+Для обратного прохода аналогично: $\text{Var}(W) = \frac{2}{n_{\text{out}}}$.
+
+**Когда применять:** ReLU, LeakyReLU, ELU и любые активации, «убивающие» часть входов.
+
+```python
+import torch.nn as nn
+
+# Xavier — для Tanh/Sigmoid/Linear
+linear_tanh = nn.Linear(256, 256)
+nn.init.xavier_uniform_(linear_tanh.weight)
+
+# Kaiming — для ReLU
+linear_relu = nn.Linear(256, 256)
+nn.init.kaiming_uniform_(linear_relu.weight, nonlinearity='relu')
+
+# Kaiming — для GELU/SiLU (приближение)
+linear_gelu = nn.Linear(256, 256)
+nn.init.kaiming_uniform_(linear_gelu.weight, nonlinearity='linear')
+```
+
+| Активация | Рекомендуемая инициализация | Gain |
+|---|---|---|
+| Linear / Tanh | Xavier | $5/3$ |
+| ReLU | Kaiming (fan_in) | $\sqrt{2}$ |
+| LeakyReLU($a$) | Kaiming | $\sqrt{2/(1+a^2)}$ |
+| GELU / SiLU | Kaiming (линейный) | ~1 |
+| Sigmoid | Xavier | 1 |
+
+::: {.callout-note title="PyTorch defaults"}
+По умолчанию `nn.Linear` использует Kaiming uniform (fan_in). Это хорошо для ReLU, но может быть субоптимально для Transformer с GELU. На практике при наличии LayerNorm/BatchNorm разница небольшая.
+:::
+
+---
+
+## 4. Регуляризация
+
+### 4.1 L1 и L2 Weight Decay
+
+Регуляризация добавляет штраф к функции потерь, препятствуя переобучению:
+
+$$
+\mathcal{L}_{\text{reg}} = \mathcal{L} + \lambda_2 \|W\|_2^2 + \lambda_1 \|W\|_1
+$$
+
+**L2 (Ridge):** $\mathcal{L} + \lambda \sum_{i,j} W_{ij}^2$. При SGD соответствует уменьшению весов на каждом шаге: $W \leftarrow W(1 - 2\lambda\eta) - \eta \nabla_W \mathcal{L}$. Хорошо управляет большими весами.
+
+**L1 (Lasso):** $\mathcal{L} + \lambda \sum_{i,j} |W_{ij}|$. Индуцирует **разреженность** — многие веса обнуляются. Полезно для feature selection.
+
+```python
+# L2 через weight_decay в оптимизаторе (правильный способ)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+# L1 вручную (редко нужен)
+l1_loss = sum(p.abs().sum() for p in model.parameters())
+loss = criterion(output, target) + 1e-5 * l1_loss
+```
+
+::: {.callout-warning title="AdamW vs Adam + weight_decay"}
+В `Adam` параметр `weight_decay` реализован **неправильно** — он применяется после adaptive scaling, что искажает регуляризацию. `AdamW` (Loshchilov & Hutter, 2019) применяет weight decay **напрямую** к весам, независимо от градиентов. Всегда используйте `AdamW`.
+:::
+
+### 4.2 Dropout
+
+**Механизм:** при обучении каждый нейрон зануляется с вероятностью $p$ независимо. Это эквивалентно обучению ансамбля $2^n$ подсетей с разделёнными весами.
+
+**Inverted dropout** (стандарт в PyTorch): при обучении выжившие нейроны масштабируются на $\frac{1}{1-p}$, чтобы ожидаемое значение активации не изменилось. При инференсе ничего не меняется.
+
+$$
+\tilde{h}_i = \begin{cases} \frac{h_i}{1 - p} & \text{с вероятностью } 1-p \\ 0 & \text{с вероятностью } p \end{cases}
+$$
+
+```python
+class MLPWithDropout(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p=dropout),   # применяется только в режиме train
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = MLPWithDropout(784, 512, 10)
+
+# КРИТИЧЕСКИ ВАЖНО: переключать режимы!
+model.train()    # Dropout активен
+output = model(x)
+
+# Переключаем в inference-режим
+model.training = False  # эквивалентно model.eval()
+with torch.no_grad():
+    output = model(x)
+```
+
+::: {.callout-warning title="Самая частая ошибка"}
+Забыть переключить модель в inference-режим перед валидацией. Dropout активен в режиме `.train()` — метрики будут занижены и стохастичны. Всегда вызывайте `model.eval()` + `torch.no_grad()` на валидации.
+:::
+
+**Где ставить Dropout:**
+- После активации в MLP: стандарт
+- После attention в Transformer: частая практика
+- **Не** ставить между нормализацией и активацией
+- При малых датасетах $p = 0.3$–$0.5$; для больших моделей $p = 0.1$
+
+### 4.3 DropPath (Stochastic Depth)
+
+DropPath — это Dropout на уровне **целых блоков**. Используется в ResNet-стиле и ViT: с вероятностью $p_l$ весь остаточный блок зануляется:
+
+$$
+x_{l+1} = x_l + \underbrace{\text{DropPath}(F_l(x_l))}_{\text{равно 0 с вероятностью }p_l}
+$$
+
+Часто вероятность увеличивается линейно с глубиной слоя: $p_l = l/L \cdot p_{\max}$.
+
+```python
+def drop_path(x, drop_prob: float, training: bool):
+    if drop_prob == 0.0 or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    # форма для broadcast по батчу
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = torch.rand(shape, device=x.device)
+    random_tensor = torch.floor(random_tensor + keep_prob)
+    return x / keep_prob * random_tensor  # inverted scaling
+```
+
+### 4.4 Label Smoothing
+
+Вместо one-hot меток $y \in \{0, 1\}$ используем «мягкие»:
+
+$$
+y_{\text{smooth}} = (1 - \varepsilon)\,y_{\text{hard}} + \frac{\varepsilon}{K}
+$$
+
+где $K$ — число классов, $\varepsilon \in [0.05, 0.15]$ обычно.
+
+Интуиция: не позволяем модели быть абсолютно уверенной. Регуляризует энтропию предсказаний, улучшает калибровку вероятностей.
+
+```python
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+# PyTorch 1.10+: встроенная поддержка
+```
+
+---
+
+## 5. BatchNorm глубоко
+
+### 5.1 Мотивация: Internal Covariate Shift
+
+Ioffe & Szegedy (2015) сформулировали проблему: во время обучения распределение входов каждого слоя меняется, потому что параметры предыдущих слоёв обновляются. Это **Internal Covariate Shift** — сеть вынуждена постоянно адаптироваться к новому распределению.
+
+Решение: нормализовать входы каждого слоя прямо во время обучения.
+
+### 5.2 Формула
+
+Для мини-батча $\mathcal{B} = \{x_1, \ldots, x_m\}$ и канала $c$:
+
+$$
+\mu_c = \frac{1}{m}\sum_{i=1}^m x_{i,c}, \qquad
+\sigma_c^2 = \frac{1}{m}\sum_{i=1}^m (x_{i,c} - \mu_c)^2
+$$
+
+$$
+\hat{x}_{i,c} = \frac{x_{i,c} - \mu_c}{\sqrt{\sigma_c^2 + \varepsilon}}, \qquad
+y_{i,c} = \gamma_c \hat{x}_{i,c} + \beta_c
+$$
+
+Параметры $\gamma_c, \beta_c$ — **обучаемые**. Без них BatchNorm ограничивал бы выразительность сети.
+
+**Для 2D тензора** `[N, C]`: усреднение по $N$.
+**Для 4D тензора** `[N, C, H, W]` (изображения): усреднение по $N, H, W$ для каждого $c$.
+
+### 5.3 Train vs Eval: Running Statistics
+
+Во время обучения $\mu$ и $\sigma^2$ считаются **по мини-батчу**. При инференсе мы хотим детерминированное поведение — используются **скользящие средние** (running statistics), накопленные за время обучения:
+
+$$
+\mu_{\text{running}} \leftarrow (1 - \alpha)\,\mu_{\text{running}} + \alpha\,\mu_{\text{batch}}
+$$
+
+$$
+\sigma^2_{\text{running}} \leftarrow (1 - \alpha)\,\sigma^2_{\text{running}} + \alpha\,\sigma^2_{\text{batch}}
+$$
+
+По умолчанию в PyTorch $\alpha = 0.1$ (параметр `momentum`).
+
+```python
+bn = nn.BatchNorm2d(num_features=64, eps=1e-5, momentum=0.1)
+
+# Режим обучения: μ и σ из батча, running stats обновляются
+bn.train()
+out = bn(x)  # x: [N, 64, H, W]
+
+# Режим инференса: μ и σ из running stats (зафиксированы)
+bn.eval()
+out = bn(x)
+
+# Проверим running stats
+print(bn.running_mean.shape)   # [64]
+print(bn.running_var.shape)    # [64]
+print(bn.weight.shape)         # gamma: [64]
+print(bn.bias.shape)           # beta: [64]
+```
+
+### 5.4 Нюансы и подводные камни
+
+**Малый batch size.** При $N = 1$–$4$ оценка $\mu$ и $\sigma^2$ крайне шумная. На ImageNet с batch=32 это ещё приемлемо, но в detection (Faster R-CNN) с batch=2 BatchNorm ломается — используют GroupNorm или замораживают BN.
+
+**BN и Dropout.** Не рекомендуется комбинировать — Dropout создаёт несоответствие между статистиками train и inference-режимов, нарушая running stats.
+
+**BN как регуляризатор.** Неожиданный эффект: шум в оценке $\mu_c$ и $\sigma_c^2$ действует как регуляризация. Ioffe & Szegedy показали, что с BN можно убрать Dropout и получить лучший результат.
+
+**Заморозка BN** при fine-tuning:
+
+```python
+def freeze_bn(model):
+    for module in model.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            module.training = False     # зафиксировать running stats
+            module.weight.requires_grad_(False)
+            module.bias.requires_grad_(False)
+```
+
+::: {.callout-warning title="Частая ошибка: забыть переключить режим"}
+Если оставить BN в режиме `.train()` при инференсе, статистики будут считаться по текущему батчу. При batch=1 это катастрофа: нормализация по одному примеру всегда даст $\hat{x} = 0$.
+:::
+
+---
+
+## 6. LayerNorm глубоко
+
+### 6.1 Мотивация
+
+Ba, Kiros, Hinton (2016) предложили LayerNorm как альтернативу BatchNorm для RNN и задач с переменной длиной. Ключевое отличие: статистики считаются **по признакам** (каналам) одного примера, а не по батчу.
+
+$$
+\mu_n = \frac{1}{C}\sum_{c=1}^C x_{n,c}, \qquad
+\sigma_n^2 = \frac{1}{C}\sum_{c=1}^C (x_{n,c} - \mu_n)^2
+$$
+
+$$
+\hat{x}_{n,c} = \frac{x_{n,c} - \mu_n}{\sqrt{\sigma_n^2 + \varepsilon}}, \qquad
+y_{n,c} = \gamma_c \hat{x}_{n,c} + \beta_c
+$$
+
+**Ключевое свойство:** поведение **идентично** в train и inference — нет running statistics. Это делает LayerNorm намного проще в использовании и отладке.
+
+### 6.2 LayerNorm в Transformer
+
+В оригинальном Transformer (Vaswani et al., 2017) — **Post-LN**: нормализация после sublayer'а:
+
+$$
+x_{l+1} = \text{LayerNorm}(x_l + \text{SubLayer}_l(x_l))
+$$
+
+Современная практика — **Pre-LN** (Xiong et al., 2020): нормализация перед sublayer'ом:
+
+$$
+x_{l+1} = x_l + \text{SubLayer}_l(\text{LayerNorm}(x_l))
+$$
+
+**Преимущества Pre-LN:**
+- Более стабильные градиенты в начале обучения
+- Не нужен warmup (или нужен меньший)
+- Стандарт в GPT-2, GPT-3, LLaMA, Mistral
+
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, nhead, d_ff, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True
+        )
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        # Pre-LN: нормализация ДО sublayer-а
+        x_norm = self.norm1(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm, attn_mask=mask)
+        x = x + self.drop(attn_out)
+        x = x + self.drop(self.ff(self.norm2(x)))
+        return x
+```
+
+### 6.3 Нормализуемые оси в PyTorch
+
+```python
+# LayerNorm для Transformer: нормализуем по последней оси (d_model)
+ln = nn.LayerNorm(normalized_shape=512)  # x: [B, T, 512]
+
+# LayerNorm для CNN: нормализуем по [C, H, W]
+ln_cnn = nn.LayerNorm([64, 28, 28])     # x: [N, 64, 28, 28]
+
+# Эквивалентность: GroupNorm(1) примерно равно LayerNorm для [N, C, H, W]
+gn_equiv = nn.GroupNorm(num_groups=1, num_channels=64)
+```
+
+---
+
+## 7. InstanceNorm, GroupNorm — когда и зачем
+
+### 7.1 Унифицированный взгляд
+
+Все методы нормализации — это одна формула, различающаяся **по каким осям** считается $(\mu, \sigma^2)$. Представим тензор как $[N, C, S]$, где $S = H \times W$ или длина последовательности.
+
+![Сравнение нормализаций](../../figures/tikz/_build/normalization.svg){#fig-norm width=100%}
+
+| Метод | Оси усреднения | Параметры |
+|---|---|---|
+| **BatchNorm** | $N \times S$ (для каждого $c$) | $\gamma, \beta \in \mathbb{R}^C$ |
+| **LayerNorm** | $C \times S$ (для каждого $n$) | $\gamma, \beta \in \mathbb{R}^{C \times S}$ |
+| **InstanceNorm** | $S$ (для каждой пары $(n, c)$) | $\gamma, \beta \in \mathbb{R}^C$ |
+| **GroupNorm** | $C_g \times S$ (для каждой группы) | $\gamma, \beta \in \mathbb{R}^C$ |
+| **RMSNorm** | $C \times S$ без центрирования | $\gamma \in \mathbb{R}^C$ |
+
+### 7.2 InstanceNorm
+
+$$
+\mu_{n,c} = \frac{1}{S}\sum_s x_{n,c,s}, \quad
+\sigma^2_{n,c} = \frac{1}{S}\sum_s (x_{n,c,s} - \mu_{n,c})^2
+$$
+
+Каждый пример, каждый канал — своя нормализация. Убирает канальную информацию об абсолютном масштабе, сохраняя структуру.
+
+**Применение:** Style Transfer (Ulyanov et al., 2017), GAN-генерация — когда важна относительная текстура, но не абсолютная яркость. `GroupNorm(C) = InstanceNorm`.
+
+```python
+# InstanceNorm2d для изображений [N, C, H, W]
+inst_norm = nn.InstanceNorm2d(num_features=64, affine=True)
+# По умолчанию affine=False — нет gamma, beta
+```
+
+### 7.3 GroupNorm
+
+Wu & He (2018) предложили компромисс: делим каналы на $G$ групп, нормализуем внутри каждой:
+
+$$
+\mu_{n,g} = \frac{1}{(C/G) \cdot S}\sum_{c \in \mathcal{G}_g}\sum_s x_{n,c,s}
+$$
+
+**Ключевое свойство:** не зависит от batch size! При $N = 1$ работает отлично.
+
+```python
+# GroupNorm: num_groups должен делить num_channels
+gn = nn.GroupNorm(num_groups=32, num_channels=256)
+# x: [N, 256, H, W] — работает при любом N
+
+# Частные случаи:
+# GroupNorm(1, C)  примерно LayerNorm (все каналы в одной группе)
+# GroupNorm(C, C)  = InstanceNorm (каждый канал — своя группа)
+```
+
+**Когда GroupNorm лучше BatchNorm:**
+- Object detection, instance segmentation: batch=2-4 изображения
+- Видео-модели: памяти мало, батч маленький
+- Дистрибутированное обучение с малым local batch size
+
+---
+
+## 8. RMSNorm — упрощение LayerNorm
+
+### 8.1 Гипотеза: центрирование не нужно
+
+Zhang & Sennrich (2019) предложили **Root Mean Square Layer Normalization**: убрать вычитание среднего из LayerNorm.
+
+Мотивация: в LayerNorm re-centering (вычитание $\mu$) и re-scaling (деление на $\sigma$) — два отдельных шага. Авторы гипотезируют, что **re-centering избыточно** — сеть и так учится компенсировать среднее через смещения $\beta$.
+
+Эмпирически: LLM-ы в конце обучения имеют активации, почти ортогональные вектору $\mathbf{1}$ (т.е. $\mu \approx 0$). Центрирование становится тривиальным.
+
+### 8.2 Формула
+
+$$
+\text{RMS}(x) = \sqrt{\frac{1}{C}\sum_{c=1}^C x_c^2}
+$$
+
+$$
+\hat{x}_c = \frac{x_c}{\text{RMS}(x) + \varepsilon}, \qquad y_c = \gamma_c \hat{x}_c
+$$
+
+**Нет $\beta$** (нет вычитания среднего — нет смысла в добавлении смещения на уровне нормализации). Только $\gamma$.
+
+### 8.3 Связь с LayerNorm
+
+LayerNorm:
+$$
+\hat{x}_c^{\text{LN}} = \frac{x_c - \mu}{\sqrt{\frac{1}{C}\sum_c (x_c - \mu)^2 + \varepsilon}}
+$$
+
+RMSNorm:
+$$
+\hat{x}_c^{\text{RMS}} = \frac{x_c}{\sqrt{\frac{1}{C}\sum_c x_c^2 + \varepsilon}}
+$$
+
+RMSNorm = LayerNorm при условии $\mu = 0$. Разница в том, что LN **вычитает** $\mu$, RMSNorm — нет.
+
+### 8.4 Реализация и применение
+
+```python
+class RMSNorm(nn.Module):
+    """Реализация из LLaMA / Mistral / Qwen."""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))  # gamma
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        # float32 для стабильности, затем обратно в исходный тип
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+```
+
+**Применение в современных LLM:**
+- LLaMA 1/2/3 — RMSNorm вместо LayerNorm
+- Mistral, Mixtral — RMSNorm
+- Gemma, Qwen, DeepSeek — RMSNorm
+- GPT-2/3, BERT — LayerNorm (более ранние модели)
+
+**Практический выигрыш:** 7–64% ускорение по сравнению с LayerNorm (зависит от реализации и устройства). На длинных последовательностях и при использовании fused kernels (Flash Attention, Triton) — ощутимо.
+
+```python
+import time
+
+dim = 4096
+seq_len = 2048
+batch = 8
+x = torch.randn(batch, seq_len, dim, device='cuda', dtype=torch.float16)
+
+ln  = nn.LayerNorm(dim).cuda().half()
+rms = RMSNorm(dim).cuda().half()
+
+# Warmup
+for _ in range(10):
+    _ = ln(x)
+    _ = rms(x)
+torch.cuda.synchronize()
+
+N = 1000
+t0 = time.perf_counter()
+for _ in range(N):
+    ln(x)
+torch.cuda.synchronize()
+print(f"LayerNorm: {(time.perf_counter()-t0)/N*1000:.3f} ms")
+
+t0 = time.perf_counter()
+for _ in range(N):
+    rms(x)
+torch.cuda.synchronize()
+print(f"RMSNorm:   {(time.perf_counter()-t0)/N*1000:.3f} ms")
+```
+
+---
+
+## 9. Визуализация активаций и dying ReLU
+
+### 9.1 Dying ReLU
+
+Нейрон «умирает», если его преактивационное значение всегда отрицательно: $z = Wx + b < 0$ для всех входов. Тогда $\text{ReLU}(z) = 0$, и градиент $\frac{\partial \mathcal{L}}{\partial z} = 0$ — нейрон никогда не обновится.
+
+**Причины:**
+- Большой learning rate (градиент «выбивает» $b$ в сильно отрицательную зону)
+- Плохая инициализация
+- Отрицательный weight decay без L2-ограничений
+
+**Диагностика:** доля нулевых активаций в ReLU-слоях.
+
+```python
+def check_dying_relu(model, dataloader, device='cpu'):
+    """Измеряет долю мёртвых нейронов в каждом ReLU-слое."""
+    activation_stats = {}
+    hooks = []
+
+    def make_hook(name):
+        def hook(module, input, output):
+            frac_zero = (output == 0).float().mean().item()
+            activation_stats.setdefault(name, []).append(frac_zero)
+        return hook
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.ReLU):
+            hooks.append(module.register_forward_hook(make_hook(name)))
+
+    model.training = False
+    with torch.no_grad():
+        for i, (x, _) in enumerate(dataloader):
+            if i >= 10:
+                break
+            model(x.to(device))
+
+    for h in hooks:
+        h.remove()
+
+    for name, fracs in activation_stats.items():
+        mean_frac = sum(fracs) / len(fracs)
+        status = "DYING!" if mean_frac > 0.5 else "ok"
+        print(f"{name}: {mean_frac:.1%} нулей — {status}")
+```
+
+### 9.2 BatchNorm как регуляризатор
+
+Неочевидный факт из оригинальной статьи Ioffe & Szegedy: BatchNorm снижает переобучение благодаря **шуму** в оценке $\mu_c$ и $\sigma_c^2$ по мини-батчу. Этот шум — форма стохастической регуляризации.
+
+Эффекты:
+- Позволяет убрать Dropout (или уменьшить $p$)
+- Сглаживает ландшафт функции потерь (Santurkar et al., 2018)
+- Позволяет использовать более высокие learning rate
+
+### 9.3 Мониторинг статистик активаций (W&B / TensorBoard)
+
+```python
+import wandb
+
+class ActivationMonitor:
+    """Логирует статистики активаций каждые N шагов."""
+
+    def __init__(self, model, log_every=100):
+        self.log_every = log_every
+        self.step = 0
+        self.hooks = []
+        self._register_hooks(model)
+
+    def _register_hooks(self, model):
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.ReLU, nn.GELU, nn.SiLU)):
+                self.hooks.append(
+                    module.register_forward_hook(self._make_hook(name))
+                )
+
+    def _make_hook(self, name):
+        def hook(module, input, output):
+            if self.step % self.log_every == 0:
+                with torch.no_grad():
+                    wandb.log({
+                        f"acts/{name}/mean":      output.mean().item(),
+                        f"acts/{name}/std":       output.std().item(),
+                        f"acts/{name}/frac_zero": (output == 0).float().mean().item(),
+                        f"acts/{name}/max_abs":   output.abs().max().item(),
+                    }, step=self.step)
+        return hook
+
+    def step_update(self):
+        self.step += 1
+
+    def remove(self):
+        for h in self.hooks:
+            h.remove()
+
+
+def log_gradient_norms(model, step):
+    """Логирует нормы градиентов по слоям."""
+    total_sq = 0.0
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            norm = param.grad.norm().item()
+            total_sq += norm ** 2
+            wandb.log({f"grad_norm/{name}": norm}, step=step)
+    wandb.log({"grad_norm/total": total_sq ** 0.5}, step=step)
+```
+
+**Что искать на графиках:**
+
+| Симптом | Вероятная причина | Решение |
+|---|---|---|
+| Активации → 0 в ReLU-слоях | Dying ReLU | Уменьшить LR, сменить активацию |
+| $\|grad\| \to 0$ в ранних слоях | Vanishing gradient | Нормализация, skip connections |
+| $\|grad\| \gg 1$ | Exploding gradient | Gradient clipping, меньший LR |
+| Большой разрыв train/val loss | Переобучение | Dropout, weight decay |
+| $\sigma_{BN} \approx 0$ в канале | Мёртвый канал | Проверить инициализацию |
+
+---
+
+## 10. Практика: чеклист для отладки обучения
+
+### 10.1 До запуска
+
+```python
+# 1. Проверьте санитарность инициализации
+model = MyModel()
+x_test = torch.randn(32, input_dim)
+with torch.no_grad():
+    out = model(x_test)
+print(f"Output: mean={out.mean():.3f}, std={out.std():.3f}")
+# Ожидаем: mean~0, std~O(1)
+
+# 2. Проверьте loss на случайных предсказаниях
+# Для классификации с K классами: ожидаем -log(1/K) = log(K)
+import math
+K = 10
+print(f"Expected initial CE loss: {math.log(K):.3f}")  # 2.303 для 10 классов
+
+# 3. Overfit on a single batch — если не можете, модель сломана
+single_x, single_y = next(iter(dataloader))
+opt_debug = torch.optim.AdamW(model.parameters(), lr=1e-3)
+for step in range(200):
+    model.train()
+    loss = criterion(model(single_x), single_y)
+    opt_debug.zero_grad()
+    loss.backward()
+    opt_debug.step()
+    if step % 50 == 0:
+        print(f"step={step}, loss={loss.item():.4f}")
+# Должны увидеть loss -> ~0
+```
+
+### 10.2 Во время обучения
+
+```python
+def train_epoch(model, loader, optimizer, criterion, scaler, global_step):
+    model.train()
+    for x, y in loader:
+        x, y = x.cuda(), y.cuda()
+        optimizer.zero_grad()
+
+        # AMP для ускорения (опционально)
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            out = model(x)
+            loss = criterion(out, y)
+
+        scaler.scale(loss).backward()
+
+        # Gradient clipping — обязательно перед step
+        scaler.unscale_(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=1.0
+        )
+
+        scaler.step(optimizer)
+        scaler.update()
+
+        if global_step % 100 == 0:
+            wandb.log({
+                "train/loss":      loss.item(),
+                "train/grad_norm": grad_norm.item(),
+                "train/lr":        optimizer.param_groups[0]['lr'],
+            }, step=global_step)
+
+        global_step += 1
+    return global_step
+```
+
+### 10.3 Выбор нормализации: итоговое руководство
+
+```
+Задача / архитектура
+├── CNN + большой батч (>=32)     → BatchNorm
+├── CNN + малый батч (<16)        → GroupNorm(32)
+├── Transformer / NLP             → LayerNorm (Pre-LN для глубоких)
+├── Большой LLM (LLaMA-стиль)    → RMSNorm (Pre-LN)
+├── Style Transfer / GAN          → InstanceNorm
+└── Нужна стабильность при любом batch  → GroupNorm
+```
+
+---
+
+## Резюме
+
+| Тема | Ключевое знание |
+|---|---|
+| Universal Approximation | Гарантирует существование, не алгоритм поиска |
+| Глубина vs ширина | Глубокие сети эффективнее при иерархических признаках |
+| ReLU / GELU / SiLU | ReLU быстрый, GELU стандарт в Transformer |
+| Vanishing / Exploding | Экспоненциально в числе слоёв; фикс: инициализация + нормализация |
+| Xavier / Kaiming | Xavier для симметричных активаций, Kaiming для ReLU |
+| L2 / Dropout / DropPath | Разные уровни регуляризации; AdamW для weight decay |
+| BatchNorm | По батчу; train≠inference; шум как регуляризатор |
+| LayerNorm | По признакам; train=inference; стандарт для Transformer |
+| GroupNorm | Компромисс; работает при малом батче |
+| RMSNorm | LayerNorm без центрирования; стандарт LLM post-2023 |
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
 - **Семинар** ([basic](../../seminars/03-mlp-norm/basic.html) / [advanced](../../seminars/03-mlp-norm/advanced.html)): реализация BN и LN с нуля, исследование нестабильности BN при малых батчах, открытая задача по Ablation Study нормализаций.
-- **ДЗ**: [03-mlp-norm](../../homework/03-mlp-norm/README.qmd) — проведение Ablation Study на табличных данных и защита своих архитектурных выборов.
+- **ДЗ**: [03-mlp-norm](../../homework/03-mlp-norm/README.qmd) — Ablation Study на табличных данных, реализация RMSNorm и сравнение с LayerNorm на трансформерном блоке, визуализация активаций через W&B.
 :::
+
+---
+
+## Литература
+
+- Ioffe, S., & Szegedy, C. (2015). **Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift**. arXiv:1502.03167.
+- Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). **Layer Normalization**. arXiv:1607.06450.
+- Zhang, B., & Sennrich, R. (2019). **Root Mean Square Layer Normalization**. arXiv:1910.07467.
+- Wu, Y., & He, K. (2018). **Group Normalization**. ECCV 2018.
+- He, K., et al. (2015). **Delving Deep into Rectifiers** (Kaiming init). ICCV 2015.
+- Glorot, X., & Bengio, Y. (2010). **Understanding the difficulty of training deep feedforward neural networks**. AISTATS 2010.
+- Santurkar, S., et al. (2018). **How Does Batch Normalization Help Optimization?** NeurIPS 2018.
+- Loshchilov, I., & Hutter, F. (2019). **Decoupled Weight Decay Regularization** (AdamW). ICLR 2019.

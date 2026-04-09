@@ -1,106 +1,149 @@
 % normalization.tex — BN / LN / IN / GN / RMSNorm side-by-side.
 % Используется в lectures/03-mlp-norm и lectures/04-cnn (как припоминание).
-% Идея визуализации: тензор [N, C, H*W] изображён как сетка кубиков; цветом
-% выделена область, по которой считаются среднее и дисперсия.
+% Идея визуализации: тензор [N, C, S] в изометрической проекции;
+% подсветкой выделена область, по которой считаются μ и σ².
 %
 % Скомпилировать: python figures/render.py figures/tikz/normalization.tex
 % Подключить в .qmd: ![](../figures/tikz/_build/normalization.svg)
+%
+% Тип нормализации передаётся числом:
+%   1=BN  2=LN  3=IN  4=GN  5=RMSNorm
 
-\documentclass[tikz,border=4pt]{standalone}
+\documentclass[tikz,border=8pt]{standalone}
 \input{_preamble.tex}
 
 \begin{document}
-\begin{tikzpicture}[
-  cube/.style={draw=ml3ink, line width=0.35pt, fill=ml3soft},
-  hl/.style={draw=ml3ink, line width=0.4pt, fill=ml3accent!55},
-  panel title/.style={font=\small\bfseries\color{ml3ink}, anchor=north},
-  panel sub/.style={font=\scriptsize\color{ml3muted}, anchor=north},
-  x=4mm, y=4mm
-]
 
-% --- Параметры тензора (визуально маленькие, иначе фигура огромная) --------
-\def\Nsamples{4}    % batch
-\def\Cchans{6}      % channels
-\def\Spatial{4}     % H*W flattened
-\def\panelW{38mm}
-\def\panelGap{2mm}
+% ---- Изометрические единичные векторы (в mm) ---------------------------------
+% Ось C → вправо-вниз:  (ex, -0.5·ex)
+% Ось S → вверх:        (0, ey)
+% Ось N → влево-вниз:  (-ex, -0.5·ex)
+\pgfmathsetmacro\ex{3.6}   % горизонтальный масштаб
+\pgfmathsetmacro\ey{3.6}   % вертикальный масштаб
+\pgfmathsetmacro\ez{2.0}   % глубина (N-ось)
 
-% --- Макрос: одна "панель" с типом нормализации --------------------------
-% #1 — anchor/coordinate
-% #2 — заголовок (BatchNorm и т.п.)
-% #3 — формула области (по чему усредняем)
-% #4 — тип подсветки: "bn", "ln", "in", "gn", "rms"
+% Изо-смещение на 1 шаг по каждой оси (в mm):
+%   dC = (ex, -0.5*ex), dS = (0, ey), dN = (-ez, -0.5*ez)
+\pgfmathsetmacro\dCx{\ex}
+\pgfmathsetmacro\dCy{-0.5*\ex}
+\pgfmathsetmacro\dSx{0}
+\pgfmathsetmacro\dSy{\ey}
+\pgfmathsetmacro\dNx{-\ez}
+\pgfmathsetmacro\dNy{-0.5*\ez}
+
+% --- Макрос: один куб в позиции (ci, si, ni), 0-based ----------------------
+% #1=fill color, #2=ci, #3=si, #4=ni
+\newcommand{\isocube}[4]{
+  % Корень куба (нижний-левый-ближний угол)
+  \pgfmathsetmacro\Ox{(#2)*\dCx + (#3)*\dSx + (#4)*\dNx}
+  \pgfmathsetmacro\Oy{(#2)*\dCy + (#3)*\dSy + (#4)*\dNy}
+  % Четыре вершины фронтальной грани (C-S плоскость, n=const):
+  % P00 = (Ox, Oy)
+  % P10 = P00 + dC
+  % P11 = P00 + dC + dS
+  % P01 = P00 + dS
+  \pgfmathsetmacro\Axx{\Ox}                   \pgfmathsetmacro\Axy{\Oy}
+  \pgfmathsetmacro\Bxx{\Ox+\dCx}              \pgfmathsetmacro\Bxy{\Oy+\dCy}
+  \pgfmathsetmacro\Cxx{\Ox+\dCx}              \pgfmathsetmacro\Cxy{\Oy+\dCy+\dSy}
+  \pgfmathsetmacro\Dxx{\Ox}                   \pgfmathsetmacro\Dxy{\Oy+\dSy}
+  % Верхняя грань (C-N, s=top):
+  \pgfmathsetmacro\Exx{\Ox+\dNx}              \pgfmathsetmacro\Exy{\Oy+\dSy+\dNy}
+  \pgfmathsetmacro\Fxx{\Ox+\dCx+\dNx}        \pgfmathsetmacro\Fxy{\Oy+\dCy+\dSy+\dNy}
+  % Боковая правая грань (N-S, c=right):
+  \pgfmathsetmacro\Gxx{\Ox+\dCx+\dNx}        \pgfmathsetmacro\Gxy{\Oy+\dCy+\dNy}
+  % Рисуем три видимые грани от тёмного к светлому
+  % Правая грань (N-S): самая тёмная
+  \fill[#1!50, draw=ml3ink, line width=0.2pt]
+    (\Bxx mm, \Bxy mm) -- (\Gxx mm, \Gxy mm)
+    -- (\Fxx mm, \Fxy mm) -- (\Cxx mm, \Cxy mm) -- cycle;
+  % Верхняя грань (C-N): средняя
+  \fill[#1!80, draw=ml3ink, line width=0.2pt]
+    (\Dxx mm, \Dxy mm) -- (\Cxx mm, \Cxy mm)
+    -- (\Fxx mm, \Fxy mm) -- (\Exx mm, \Exy mm) -- cycle;
+  % Фронтальная грань (C-S): самая светлая
+  \fill[#1, draw=ml3ink, line width=0.2pt]
+    (\Axx mm, \Axy mm) -- (\Bxx mm, \Bxy mm)
+    -- (\Cxx mm, \Cxy mm) -- (\Dxx mm, \Dxy mm) -- cycle;
+}
+
+% --- Макрос панели ----------------------------------------------------------
+% #1 = TikZ-координата смещения (напр. {(0,0)})
+% #2 = заголовок
+% #3 = подпись формулы
+% #4 = тип: 1=BN 2=LN 3=IN 4=GN 5=RMS
 \newcommand{\normpanel}[4]{
   \begin{scope}[shift={#1}]
-    % фоновая рамка
-    \node[draw=ml3muted, dashed, rounded corners=2pt, inner sep=2mm,
-          minimum width=\panelW, minimum height=30mm, anchor=north west] (frame) at (0,0) {};
+    % Painter's algorithm: рисуем от n=3 (дальний) до n=0 (ближний)
+    \foreach \ni in {3,2,1,0} {
+      \foreach \ci in {0,1,2,3,4} {
+        \foreach \si in {0,1,2,3} {
+          % Вычисляем флаг подсветки числом 0 или 1
+          \pgfmathtruncatemacro\hlBN{(\ci==1) ? 1 : 0}
+          \pgfmathtruncatemacro\hlLN{(\ni==2) ? 1 : 0}
+          \pgfmathtruncatemacro\hlIN{(\ni==2 && \ci==2) ? 1 : 0}
+          \pgfmathtruncatemacro\hlGN{(\ni==2 && \ci>=1 && \ci<=3) ? 1 : 0}
+          \pgfmathtruncatemacro\hlRM{(\ni==2) ? 1 : 0}
 
-    % тензор: N строк × C столбцов × Spatial кубиков
-    \foreach \n in {1,...,\Nsamples} {
-      \foreach \c in {1,...,\Cchans} {
-        \foreach \s in {1,...,\Spatial} {
-          \pgfmathsetmacro\px{(\c-1)*1.0 + (\s-1)*0.18 + 1}
-          \pgfmathsetmacro\py{-(\n-1)*1.0 - (\s-1)*0.18 - 4}
+          \pgfmathtruncatemacro\useHL{
+            (#4==1 && \hlBN) || (#4==2 && \hlLN) ||
+            (#4==3 && \hlIN) || (#4==4 && \hlGN) ||
+            (#4==5 && \hlRM)
+          }
 
-          % решаем подсветку
-          \def\highlight{0}
-          \ifnum\pdfstrcmp{#4}{bn}=0
-            \ifnum\c=2 \def\highlight{1}\fi
-          \fi
-          \ifnum\pdfstrcmp{#4}{ln}=0
-            \ifnum\n=2 \def\highlight{1}\fi
-          \fi
-          \ifnum\pdfstrcmp{#4}{in}=0
-            \ifnum\n=2 \ifnum\c=2 \def\highlight{1}\fi\fi
-          \fi
-          \ifnum\pdfstrcmp{#4}{gn}=0
-            \ifnum\n=2
-              \ifnum\c<5
-                \ifnum\c>1 \def\highlight{1}\fi
-              \fi
-            \fi
-          \fi
-          \ifnum\pdfstrcmp{#4}{rms}=0
-            \ifnum\n=2 \def\highlight{1}\fi
-          \fi
-
-          \ifnum\highlight=1
-            \draw[hl] (\px, \py) rectangle ++(0.85, 0.85);
+          \ifnum\useHL=1
+            \isocube{ml3accent}{\ci}{\si}{\ni}
           \else
-            \draw[cube] (\px, \py) rectangle ++(0.85, 0.85);
+            \isocube{ml3soft}{\ci}{\si}{\ni}
           \fi
         }
       }
     }
 
-    % оси
-    \node[ml3/label, anchor=east] at (0.6, -1.5) {$N$};
-    \node[ml3/label, anchor=south] at (4.0, 0.2) {$C$};
-    \node[ml3/label, anchor=west] at (8.2, -0.6) {$H{\cdot}W$};
+    % Метки осей
+    \pgfmathsetmacro\axisCx{2.5*\dCx - 0.5}
+    \pgfmathsetmacro\axisCy{2.5*\dCy - 4}
+    \node[font=\scriptsize\color{ml3muted}] at (\axisCx mm, \axisCy mm) {$C$};
 
-    % заголовок и подформула
-    \node[panel title] at ($(frame.north) + (0, -1mm)$) {#2};
-    \node[panel sub]   at ($(frame.north) + (0, -5mm)$) {#3};
+    \pgfmathsetmacro\axisSx{-3}
+    \pgfmathsetmacro\axisSy{2.0*\dSy}
+    \node[font=\scriptsize\color{ml3muted}, anchor=east] at (\axisSx mm, \axisSy mm) {$S$};
+
+    \pgfmathsetmacro\axisNx{3.5*\dNx + 4.5*\dCx}
+    \pgfmathsetmacro\axisNy{3.5*\dNy + 4.5*\dCy + 4.5*\dSy}
+    \node[font=\scriptsize\color{ml3muted}, anchor=south] at (\axisNx mm, \axisNy mm) {$N$};
+
+    % Заголовок и подпись
+    \pgfmathsetmacro\titleX{2.5*\dCx}
+    \pgfmathsetmacro\titleY{4.5*\dSy + 3.5*\dNy + 7}
+    \node[font=\small\bfseries\color{ml3ink}, anchor=south]
+      at (\titleX mm, \titleY mm) {#2};
+    \node[font=\scriptsize\color{ml3muted}, anchor=north]
+      at (\titleX mm, {\titleY mm - 4mm}) {#3};
   \end{scope}
 }
 
-% --- Размещение пяти панелей -----------------------------------------------
-\normpanel{(0,0)}{BatchNorm}{$\mu_c, \sigma_c$ — по $N{\times}H{\times}W$}{bn}
-\normpanel{(45mm,0)}{LayerNorm}{$\mu_n, \sigma_n$ — по $C{\times}H{\times}W$}{ln}
-\normpanel{(90mm,0)}{InstanceNorm}{$\mu_{n,c}, \sigma_{n,c}$ — по $H{\times}W$}{in}
-\normpanel{(0,-38mm)}{GroupNorm}{$\mu_{n,g}, \sigma_{n,g}$ — по группе $G$}{gn}
-\normpanel{(45mm,-38mm)}{RMSNorm}{нет $\mu$; только $\mathrm{RMS}_n$}{rms}
+% --- Шаг между панелями (ширина одной панели + отступ) ----------------------
+% Ширина ≈ C*dCx + N*|dNx| + gap
+\pgfmathsetmacro\panelstep{5*\dCx + 4*\ez + 8}
 
-% --- Легенда формулы -------------------------------------------------------
-\node[anchor=north west, font=\footnotesize, text width=42mm,
-      inner sep=2mm, draw=ml3muted, rounded corners=2pt]
-  at (90mm,-38mm)
+\begin{tikzpicture}
+
+\normpanel{(0mm,0mm)}{BatchNorm}{по $N{\times}S$}{1}
+\normpanel{(\panelstep mm,0mm)}{LayerNorm}{по $C{\times}S$}{2}
+\normpanel{(2*\panelstep mm,0mm)}{InstanceNorm}{по $S$}{3}
+\normpanel{(3*\panelstep mm,0mm)}{GroupNorm}{по $C_{g}{\times}S$}{4}
+\normpanel{(4*\panelstep mm,0mm)}{RMSNorm}{по $C{\times}S$, без $\mu$}{5}
+
+% Общая формула снизу
+\pgfmathsetmacro\formulaX{2*\panelstep}
+\node[anchor=north, font=\footnotesize, text width=70mm, align=center,
+      inner sep=3mm, draw=ml3muted, rounded corners=3pt, text=ml3ink]
+  at (\formulaX mm, -8mm)
 {
-  \textbf{Общая форма:}\\[2pt]
-  $\hat x = \dfrac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}$\\[3pt]
-  $y = \gamma \hat x + \beta$\\[4pt]
-  Различие — \textit{по какой оси} считаем $\mu$ и $\sigma^2$. Подсвечена область усреднения для одного элемента батча.
+  \textbf{Общая форма:}\;
+  $\hat x = \dfrac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}$,\;
+  $y = \gamma \hat x + \beta$\\[3pt]
+  {\color{ml3accent}$\blacksquare$} — область усреднения $(\mu,\sigma^2)$
 };
 
 \end{tikzpicture}

@@ -48,3 +48,5 @@ wandb/
 lightning_logs/
 
 **/*.quarto_ipynb
+*.aux
+*.log

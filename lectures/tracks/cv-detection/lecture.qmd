@@ -1,65 +1,497 @@
 ---
-title: "Лекция: Computer Vision — детекция объектов и сегментация"
-subtitle: "Optional Track: cv-detection"
-author: "ml3-neo"
+title: "CV Detection & Segmentation"
+subtitle: "Optional Track: от R-CNN до SAM — история, архитектуры, метрики, практика"
 date: last-modified
 bibliography: ../../../refs.bib
 format:
   html:
+    toc: true
+    toc-depth: 3
     code-fold: false
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **optional track** по компьютерному зрению. Предполагается, что вы уже знакомы со свёрточными сетями из основного курса.
-:::
-
-::: {.level-toggle}
-[advanced](../../../seminars/tracks/cv-detection/advanced.html){.active}
+Это **optional track** по компьютерному зрению. Предполагается знакомство со свёрточными сетями из основного курса (модуль 04). Трек рассчитан на ~50 минут самостоятельного изучения.
 :::
 
 ## 1. От классификации к детекции
 
-В задаче классификации мы предсказываем один класс для всего изображения. В детекции нам нужно найти все объекты заданных классов и выделить их bounding box-ами. 
-Для перехода от классификации к детекции классические подходы используют **anchor boxes** (якорные рамки) — заранее заданные рамки разных размеров и пропорций, которые раскиданы по всему изображению. Модель предсказывает смещения (regression head) относительно этих рамок и вероятности классов.
+В задаче **классификации** мы предсказываем один класс для всего изображения. В **детекции** нужно найти все объекты заданных классов и описать каждый ограничивающим прямоугольником (bounding box). В **сегментации** граница уточняется до уровня пикселей.
 
-## 2. Идея YOLO v1
+Ключевые вызовы детекции:
 
-YOLO (You Only Look Once) предложила другой подход: разбить изображение на сетку (grid cells), например $S \times S$. Каждая ячейка сетки предсказывает:
-- $B$ bounding boxes (для каждого $x, y, w, h$ и уверенность $C$, что в рамке есть объект),
-- Вероятности классов при условии наличия объекта в ячейке.
-Это позволило сделать детекцию очень быстрой (single-stage).
+- **Переменное число объектов**: от нуля до сотен на одном изображении
+- **Разные масштабы**: пешеход вблизи и та же пешеход вдали — один класс, но 1000× разница в площади
+- **Перекрытия**: объекты загораживают друг друга
+- **Скорость**: реальное применение требует десятки fps
 
-## 3. Современные YOLO
+---
 
-Современные архитектуры YOLO включают в себя:
-- **Neck (FPN - Feature Pyramid Network)**: объединяет признаки с разных уровней сети (multi-scale prediction) для детекции объектов разных размеров.
-- **NMS (Non-Maximum Suppression)**: алгоритм для удаления дублирующихся рамок. Если несколько рамок сильно пересекаются и предсказывают один класс, оставляется рамка с наибольшим confidence score.
+## 2. История: R-CNN → Faster R-CNN
 
-## 4. Сегментация
+### 2.1 R-CNN (Girshick et al., 2014)
 
-- **Semantic Segmentation**: каждому пикселю присваивается класс (без разделения объектов одного класса).
-- **Instance Segmentation**: каждому пикселю присваивается класс и идентификатор конкретного объекта.
+Первая успешная глубокая сеть для детекции. Алгоритм работает в три этапа:
 
-Популярная архитектура — **U-Net**:
-- **Encoder-Decoder**: энкодер сжимает пространственное разрешение, извлекая признаки; декодер восстанавливает разрешение.
-- **Skip connections**: проброс признаков из энкодера в декодер для восстановления деталей на границах объектов.
+1. **Selective Search** генерирует ~2000 регионов-кандидатов (Region Proposals)
+2. Каждый регион вырезается и масштабируется до 227×227
+3. CNN извлекает признаки → SVM классифицирует → линейная регрессия уточняет bounding box
 
-## 5. Метрики качества
+**Главная проблема**: ~47 секунд на изображение — каждый из 2000 регионов проходит CNN отдельно. Вся работа свёрточного backbone дублируется 2000 раз.
 
-- **IoU (Intersection over Union)**: отношение площади пересечения к площади объединения двух рамок.
-- **mAP (mean Average Precision)**:
-  - **mAP@50**: средняя точность при пороге IoU = 0.5.
-  - **mAP@50:95**: усреднение mAP при порогах IoU от 0.5 до 0.95 с шагом 0.05.
+### 2.2 Fast R-CNN (Girshick, 2015)
 
-## 6. Практика в PyTorch
+Ключевая идея: сначала прогоним **всю картинку** через CNN, получим feature map, а затем для каждого региона возьмём из неё crop через **ROI Pooling**.
 
-В `torchvision.ops` есть готовые реализации:
-- `box_iou(boxes1, boxes2)` — вычисляет IoU для всех пар рамок.
-- `nms(boxes, scores, iou_threshold)` — выполняет Non-Maximum Suppression.
+$$\text{ROI Pooling}: \;\mathbb{R}^{H \times W \times C} \xrightarrow{\text{crop + adaptive pool}} \mathbb{R}^{h \times w \times C}$$
 
-COCO API используется для стандартизированного вычисления сложных метрик детекции и сегментации.
+Результат: ~0.3 сек/изображение. CNN проходит один раз. Но Selective Search по-прежнему выполняется на CPU — оставался узким местом.
+
+### 2.3 Faster R-CNN (Ren et al., 2015)
+
+Замена Selective Search на **Region Proposal Network (RPN)** — лёгкую свёрточную сеть, разделяющую backbone с детектором.
+
+**Anchors**: для каждого пикселя feature map предсказываются смещения относительно $k$ предварительно заданных прямоугольников (anchors) разных размеров и соотношений сторон.
+
+Для anchor $i$ RPN предсказывает:
+- $p_i$ — вероятность, что anchor содержит объект
+- $t_i = (t_x, t_y, t_w, t_h)$ — 4 регрессионных смещения
+
+$$\mathcal{L}_\text{RPN} = \frac{1}{N_{cls}} \sum_i L_{cls}(p_i, p_i^*) + \lambda \frac{1}{N_{reg}} \sum_i p_i^* L_{reg}(t_i, t_i^*)$$
+
+Итоговая цепочка: **backbone → feature map → RPN → ROI Pooling → classification + bbox head** — обучается end-to-end.
+
+Скорость: ~200 мс/изображение. Это стало стандартом для точных детекторов.
+
+::: {.callout-tip title="Два типа детекторов"}
+**Two-stage** (R-CNN семейство): сначала Region Proposals, потом их классификация. Точнее, медленнее.
+
+**One-stage** (YOLO, SSD, FCOS): всё за один проход. Быстрее, чуть менее точно.
+:::
+
+---
+
+## 3. YOLO: эволюция one-stage детекции
+
+YOLO (You Only Look Once) — один проход сети, нет отдельного этапа proposals.
+
+### 3.1 Ключевые версии
+
+| Версия | Год | Ключевые новшества |
+|--------|-----|-------------------|
+| YOLOv1 | 2016 | Сетка $S \times S$, каждая ячейка предсказывает $B$ боксов + классы |
+| YOLOv2 | 2017 | Anchor boxes, Batch Norm, multi-scale training, Darknet-19 |
+| YOLOv3 | 2018 | Darknet-53, предсказания на 3 масштабах (FPN-like), logistic classifiers |
+| YOLOv4 | 2020 | CSP backbone, PANet neck, CIoU loss, Mosaic augmentation |
+| YOLOv5 | 2020 | PyTorch-нативный, AutoAnchor, hyperparameter evolution |
+| YOLOv8 | 2023 | Anchor-free, decoupled head, C2f модули |
+| YOLO11  | 2024 | C3k2 блоки, SPPF, повышенная параметрическая эффективность |
+
+### 3.2 YOLOv1: базовая идея
+
+Изображение разбивается на сетку $S \times S$ (например, 7×7). Каждая ячейка предсказывает:
+- $B$ bounding boxes: $(x, y, w, h, \text{confidence})$ — 5 чисел каждый
+- $C$ вероятностей классов
+
+Итого: тензор $S \times S \times (5B + C)$.
+
+**Confidence** — произведение $P(\text{object}) \cdot \text{IoU}$. Это и вероятность объекта, и качество локализации одновременно.
+
+---
+
+## 4. Anchor-free детекция
+
+### 4.1 FCOS (Tian et al., 2019)
+
+Полностью anchor-free: для каждого пикселя feature map предсказываем расстояния до четырёх сторон ближайшего GT-бокса:
+
+$$\hat{l}, \hat{t}, \hat{r}, \hat{b} \quad \text{(left, top, right, bottom)}$$
+
+Дополнительно предсказывается **centerness** — скаляр, показывающий, насколько пиксель близок к центру объекта:
+
+$$\text{centerness}^* = \sqrt{\frac{\min(l^*, r^*)}{\max(l^*, r^*)} \cdot \frac{\min(t^*, b^*)}{\max(t^*, b^*)}} \in [0, 1]$$
+
+Centerness умножается на classification score перед NMS — подавляет предсказания с краёв объектов.
+
+### 4.2 Почему anchor-free удобнее
+
+- Нет гиперпараметров anchor sizes/ratios (их непросто подобрать)
+- Лучше работает для вытянутых и нестандартных объектов
+- Проще код и ниже порог вхождения
+
+---
+
+## 5. YOLOv8 архитектура в деталях
+
+### 5.1 Backbone: C2f
+
+**C2f (Cross Stage Partial с двумя свёртками)** — эволюция C3:
+
+```
+Input
+  ├─ Conv 1×1 → Chunk → Branch1 (identity)
+  └─                  → n × Bottleneck → Branch2
+Concat(Branch1, Branch2) → Conv 1×1
+```
+
+Каждый Bottleneck: `Conv 1×1 → Conv 3×3 → residual`. C2f даёт богатый градиентный поток (все промежуточные features конкатенируются) при компактном числе параметров.
+
+### 5.2 Neck: FPN + PAN
+
+**Feature Pyramid Network (FPN)** — top-down путь: признаки от глубоких (семантически богатых) слоёв передаются вверх к мелким (пространственно точным) через upsample + add.
+
+**Path Aggregation Network (PAN)** — bottom-up путь: обратное направление для передачи локализационной информации вниз через downsample + concat.
+
+```
+Backbone P3 ────────────────────────── N3 (small objects, stride 8)
+Backbone P4 ──── FPN upsample ──── PAN downsample ── N4 (medium, stride 16)
+Backbone P5 ────────────────────────── N5 (large, stride 32)
+```
+
+### 5.3 Head: Decoupled Anchor-Free
+
+Для каждого масштаба — раздельные головы для классификации и регрессии:
+
+```python
+# Cls head
+cls_out = Conv(C, reg_max=4) -> Conv(C, num_classes) -> sigmoid
+
+# Reg head
+reg_out = Conv(C, reg_max=4) -> Conv(C, 4 * reg_max) -> DFL -> xyxy
+```
+
+**Distribution Focal Loss (DFL)**: вместо числа предсказываем распределение по дискретной сетке $\{0,1,\ldots,n-1\}$:
+
+$$\hat{d} = \sum_{i=0}^{n-1} i \cdot \text{softmax}(\mathbf{z})_i$$
+
+Это позволяет модели выражать неуверенность в точной границе объекта.
+
+### 5.4 Loss
+
+$$\mathcal{L} = \lambda_{\text{box}}\,\mathcal{L}_\text{box} + \lambda_{\text{cls}}\,\mathcal{L}_\text{cls} + \lambda_{\text{dfl}}\,\mathcal{L}_\text{dfl}$$
+
+**CIoU Loss** для регрессии боксов:
+
+$$\mathcal{L}_\text{CIoU} = 1 - \text{IoU} + \underbrace{\frac{\rho^2(\mathbf{b}, \mathbf{b}^{gt})}{c^2}}_{\text{центр}} + \underbrace{\alpha v}_{\text{форма}}$$
+
+где $\rho$ — Евклидово расстояние между центрами, $c$ — диагональ наименьшего охватывающего прямоугольника, $v = \frac{4}{\pi^2}\left(\arctan\frac{w^{gt}}{h^{gt}} - \arctan\frac{w}{h}\right)^2$.
+
+**VFL (Varifocal Loss)** для классификации с target = quality score (IoU × class):
+
+$$\mathcal{L}_\text{VFL}(p, q) = -\left[ q \log p + (1-q)\log(1-p) \right] \cdot \begin{cases} q & q > 0 \\ \alpha p^\gamma & q = 0 \end{cases}$$
+
+### 5.5 Аугментации
+
+| Аугментация | Описание | Зачем |
+|-------------|----------|-------|
+| **Mosaic** | 4 изображения склеиваются в одно 2×2 | Разнообразие контекста, больше объектов в батче |
+| **MixUp** | $\tilde{x} = \lambda x_i + (1-\lambda)x_j$ | Регуляризация, мягкие метки |
+| **RandomPerspective** | Аффинные трансформации | Инвариантность к проекции |
+| **HSV augment** | Случайный сдвиг цвета/яркости | Инвариантность к освещению |
+| **Flips** | Горизонтальный переворот | Симметрия |
+| **Copy-Paste** | Вставка объектов из других изображений | Борьба с дисбалансом классов |
+
+---
+
+## 6. Метрики детекции
+
+### 6.1 IoU (Intersection over Union)
+
+$$\text{IoU}(A, B) = \frac{|A \cap B|}{|A \cup B|} \in [0, 1]$$
+
+Предсказание считается **True Positive** (TP), если $\text{IoU} \geq$ порог (обычно 0.5) и класс совпадает.
+
+### 6.2 Precision и Recall
+
+При фиксированном пороге confidence:
+
+$$\text{Precision} = \frac{TP}{TP + FP}, \qquad \text{Recall} = \frac{TP}{TP + FN}$$
+
+$FP$ — боксы, которых нет в GT; $FN$ — GT-боксы, которые детектор пропустил.
+
+### 6.3 AP (Average Precision)
+
+При изменении порога confidence строим PR-кривую. AP — площадь под ней:
+
+$$\text{AP} = \int_0^1 p(r)\,dr$$
+
+На практике используется 101-точечная интерполяция (COCO):
+
+$$\text{AP} = \frac{1}{101}\sum_{r \in \{0, 0.01, \ldots, 1\}} p_{\text{interp}}(r)$$
+
+### 6.4 mAP@50 и mAP@50:95
+
+$$\text{mAP@50} = \frac{1}{C}\sum_{c=1}^{C} \text{AP}_c^{IoU=0.5}$$
+
+$$\text{mAP@50:95} = \frac{1}{10}\sum_{t \in \{0.50, 0.55, \ldots, 0.95\}} \text{mAP@t}$$
+
+**mAP@50:95** — основная метрика COCO: требует и правильного класса, и точной локализации.
+
+::: {.callout-note}
+На COCO YOLOv8-X достигает ~53.9 mAP@50:95. Для сравнения — YOLOv3 тот же год: ~33 mAP. Прирост в ~20 пунктов за 5 лет.
+:::
+
+---
+
+## 7. Сегментация
+
+### 7.1 Три задачи
+
+| Задача | Что предсказывается | Пример |
+|--------|--------------------|----|
+| **Semantic** | Класс каждого пикселя | Все пиксели «машина» = один цвет |
+| **Instance** | Отдельная маска для каждого объекта | Машина 1 ≠ Машина 2 |
+| **Panoptic** | Semantic + Instance в единой системе | Unified approach |
+
+### 7.2 U-Net
+
+Классическая архитектура (Ronneberger et al., 2015), изначально для медицинских изображений — сегментация клеток на микроскопии. Стала универсальным стандартом.
+
+```
+Input (3×512×512)
+  ↓ enc1: 64
+  ↓ Pool
+  ↓ enc2: 128
+  ↓ Pool
+  ↓ enc3: 256
+  ↓ Pool
+  ↓ bottleneck: 512
+  ↑ Upsample + concat(enc3) → dec3: 256
+  ↑ Upsample + concat(enc2) → dec2: 128
+  ↑ Upsample + concat(enc1) → dec1: 64
+  → Conv 1×1 → n_classes
+```
+
+**Skip connections** — ключевая идея: признаки из энкодера конкатенируются с декодером на том же пространственном масштабе. Декодер получает **оба типа информации**: семантику (от глубины) и пространственную точность (от мелких слоёв).
+
+```python
+import torch, torch.nn as nn
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+        )
+    def forward(self, x): return self.net(x)
+
+class UNet(nn.Module):
+    def __init__(self, in_ch=3, n_classes=2, base=64):
+        super().__init__()
+        b = base
+        self.enc1 = DoubleConv(in_ch, b)
+        self.enc2 = DoubleConv(b,   b*2)
+        self.enc3 = DoubleConv(b*2, b*4)
+        self.pool = nn.MaxPool2d(2)
+        self.bottleneck = DoubleConv(b*4, b*8)
+        self.up3 = nn.ConvTranspose2d(b*8, b*4, 2, stride=2)
+        self.dec3 = DoubleConv(b*8, b*4)  # concat удваивает каналы
+        self.up2 = nn.ConvTranspose2d(b*4, b*2, 2, stride=2)
+        self.dec2 = DoubleConv(b*4, b*2)
+        self.up1 = nn.ConvTranspose2d(b*2, b,   2, stride=2)
+        self.dec1 = DoubleConv(b*2, b)
+        self.out  = nn.Conv2d(b, n_classes, 1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        b  = self.bottleneck(self.pool(e3))
+        d  = self.dec3(torch.cat([self.up3(b),  e3], dim=1))
+        d  = self.dec2(torch.cat([self.up2(d),  e2], dim=1))
+        d  = self.dec1(torch.cat([self.up1(d),  e1], dim=1))
+        return self.out(d)
+
+model = UNet(in_ch=3, n_classes=21)  # VOC: 20 классов + фон
+```
+
+### 7.3 Mask R-CNN (He et al., 2017)
+
+Расширение Faster R-CNN: добавляется третья голова — **mask head**. Небольшая FCN (fully convolutional network), предсказывающая бинарную маску 28×28 для каждого ROI.
+
+**ROIAlign** вместо ROIPool: ROIPool квантизирует координаты (потеря субпиксельной точности критична для маски), ROIAlign использует **билинейную интерполяцию** на нецелых координатах — маски выравниваются идеально.
+
+$$\mathcal{L} = \mathcal{L}_\text{cls} + \mathcal{L}_\text{box} + \mathcal{L}_\text{mask}$$
+
+$\mathcal{L}_\text{mask}$ — binary cross-entropy на каждом пикселе маски 28×28, **только для правильного класса** (класс-агностичные маски, выбор класса из $\mathcal{L}_\text{cls}$).
+
+### 7.4 SAM (Segment Anything Model, Meta AI, 2023)
+
+Универсальная модель сегментации с prompt-based интерфейсом: один раз вычисляем embedding картинки, затем интерактивно уточняем маски.
+
+**Архитектура:**
+- **Image Encoder**: ViT-H (~636M параметров) → dense embedding 64×64
+- **Prompt Encoder**: точки, боксы, маски → sparse + dense embeddings
+- **Mask Decoder**: lightweight Transformer → 3 маски-кандидата + IoU scores
+
+**Данные**: SA-1B — 1.1 миллиарда масок на 11 миллионах изображений, из которых 99.1% сгенерированы самой SAM (human-in-the-loop annotation engine).
+
+```python
+from segment_anything import sam_model_registry, SamPredictor
+import numpy as np
+
+sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h.pth")
+predictor = SamPredictor(sam)
+
+# Embed image (делается один раз)
+predictor.set_image(image_rgb)  # numpy H×W×3
+
+# Prompt: точки
+masks, scores, logits = predictor.predict(
+    point_coords=np.array([[x, y]]),
+    point_labels=np.array([1]),   # 1 = foreground
+    multimask_output=True,
+)
+# masks: [3, H, W] bool
+```
+
+---
+
+## 8. Практика: Ultralytics YOLOv8
+
+### 8.1 Inference
+
+```python
+from ultralytics import YOLO
+
+model = YOLO("yolov8n.pt")      # nano | small | medium | large | xlarge
+
+results = model("photo.jpg", conf=0.25, iou=0.45)
+for r in results:
+    print(r.boxes.xyxy)         # [N, 4] float32
+    print(r.boxes.cls)          # [N] int
+    print(r.boxes.conf)         # [N] float
+    r.save("out.jpg")           # сохранить с рисовкой
+```
+
+### 8.2 Обучение на кастомном датасете
+
+Структура датасета (YOLO формат):
+```
+dataset/
+  images/train/  img001.jpg ...
+  images/val/    img101.jpg ...
+  labels/train/  img001.txt ...   # per image: class cx cy w h (normalized)
+  labels/val/    img101.txt ...
+dataset.yaml
+```
+
+```yaml
+# dataset.yaml
+path: /data/my_dataset
+train: images/train
+val:   images/val
+nc: 3
+names: ['cat', 'dog', 'person']
+```
+
+```python
+model = YOLO("yolov8m.pt")
+model.train(
+    data="dataset.yaml",
+    epochs=100,
+    imgsz=640,
+    batch=16,
+    device=0,
+    lr0=0.01,
+    mosaic=1.0,
+    mixup=0.1,
+    patience=20,         # early stopping
+    project="runs/det",
+    name="exp1",
+)
+metrics = model.val()
+print(f"mAP50:   {metrics.box.map50:.3f}")
+print(f"mAP50-95:{metrics.box.map:.3f}")
+```
+
+### 8.3 Instance Segmentation с YOLOv8-seg
+
+```python
+model = YOLO("yolov8n-seg.pt")
+results = model("photo.jpg")
+for r in results:
+    masks = r.masks.data   # [N, H, W] float32
+    boxes = r.boxes.xyxy
+```
+
+### 8.4 Torchvision — Fine-tuning Faster R-CNN
+
+```python
+import torchvision
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+
+def get_fasterrcnn(num_classes):
+    model = fasterrcnn_resnet50_fpn(weights="DEFAULT")
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
+model = get_fasterrcnn(num_classes=4)  # 3 класса + фон
+
+# Dataset: возвращает (image_tensor, target_dict)
+# target = {"boxes": FloatTensor[N,4], "labels": Int64Tensor[N], "image_id": ...}
+```
+
+### 8.5 COCO формат аннотаций
+
+```json
+{
+  "images": [
+    {"id": 1, "file_name": "img001.jpg", "width": 640, "height": 480}
+  ],
+  "annotations": [
+    {
+      "id": 1, "image_id": 1, "category_id": 1,
+      "bbox": [100, 150, 200, 100],
+      "area": 20000, "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {"id": 1, "name": "cat"},
+    {"id": 2, "name": "dog"}
+  ]
+}
+```
+
+---
+
+## 9. Сравнение архитектур
+
+| Модель | mAP50-95 (COCO) | FPS (V100) | Параметры | Тип |
+|--------|-----------------|-----------|-----------|-----|
+| Faster R-CNN R50-FPN | 37.0 | ~18 | 41M | 2-stage, anchor |
+| YOLOv3-608 | 33.0 | 20 | 62M | 1-stage, anchor |
+| FCOS R50-FPN | 38.7 | 22 | 32M | 1-stage, anchor-free |
+| YOLOv8n | 37.3 | 80+ | 3.2M | 1-stage, anchor-free |
+| YOLOv8x | 53.9 | 14 | 68M | 1-stage, anchor-free |
+| Mask R-CNN R50 | 38.2 (box) | 11 | 44M | 2-stage + mask |
+
+::: {.callout-tip title="Когда что использовать"}
+- **Edge/реальное время**: YOLOv8n или YOLOv8s (`yolov8n.pt`)
+- **Баланс скорость/точность**: YOLOv8m
+- **Максимальная точность**: YOLOv8x или Cascade R-CNN
+- **Instance segmentation**: `yolov8m-seg.pt` или Mask R-CNN
+- **Универсальная сегментация без дообучения**: SAM
+:::
+
+---
+
+## Итоги
+
+1. **R-CNN → Faster R-CNN**: от 2000 отдельных проходов CNN до единого end-to-end детектора с RPN
+2. **YOLO**: один проход сети; с v8 — anchor-free, decoupled head, FPN+PAN neck
+3. **Потери**: CIoU для локализации, VFL/BCE для классификации, DFL для точных границ
+4. **Метрики**: IoU определяет TP; AP = площадь под PR-кривой; mAP@50:95 — строгий стандарт COCO
+5. **Сегментация**: U-Net (skip connections), Mask R-CNN (ROIAlign + mask FCN head), SAM (prompt-based universal)
+
+---
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([advanced](../../../seminars/tracks/cv-detection/advanced.html)): реализация упрощённого детектора (YOLO-style) на синтетических данных и NMS.
-- **ДЗ**: [cv-detection](../../../homework/tracks/cv-detection/README.qmd) — обучить детектор на датасете, посчитать mAP@50.
+- **Семинар** ([advanced](../../../seminars/tracks/cv-detection/advanced.html)): обучение YOLOv8 на кастомном датасете, разметка в Label Studio, анализ ошибок.
+- **ДЗ**: [cv-detection](../../../homework/tracks/cv-detection/README.qmd) — обучить детектор на PASCAL VOC или своём датасете, добиться mAP@50 > 0.6, написать отчёт с анализом.
 :::

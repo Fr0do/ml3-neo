@@ -1,134 +1,1067 @@
 ---
 title: "Лекция 04 — Свёрточные нейронные сети"
-subtitle: "Receptive field, residual, нормализации, аугментации"
+subtitle: "От Conv2d до современных архитектур: ResNet, EfficientNet, ConvNeXt"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **четвёртый core-модуль**. Предполагается знакомство с MLP, batch/layer-нормализацией и базовым PyTorch (модули 02–03). Дальше — последовательные модели (модуль 05) и transformer (модуль 06).
+Это **четвёртый core-модуль**. Предполагается знакомство с MLP, BatchNorm/LayerNorm и базовым PyTorch (модули 02–03). В этой лекции мы строим интуицию о том, почему CNN — правильный inductive bias для изображений, и поднимаемся от одного Conv2d-слоя до современных архитектур. Следующий модуль (05) — последовательные модели, (06) — трансформеры.
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/04-cnn/basic.html){.active} · [advanced](../../seminars/04-cnn/advanced.html)
 :::
 
-## 1. Зачем нам свёртки
+---
 
-Полносвязный слой на изображении $H{\times}W{\times}3$ имеет $O(HWC \cdot d_{\text{out}})$ параметров и не использует пространственную структуру: он не знает, что соседние пиксели связаны, и не инвариантен к сдвигу. Свёрточный слой решает обе проблемы сразу:
+## 1. Почему MLP не работает с изображениями
 
-- **локальность** — каждый выходной пиксель зависит только от окна $k{\times}k$ во входе;
-- **разделение параметров** — одно и то же ядро $W \in \mathbb{R}^{k \times k \times C_{\text{in}} \times C_{\text{out}}}$ применяется ко всем позициям;
-- **эквивариантность к сдвигу** — сдвиг входа даёт сдвиг выхода.
-
-Формально один выходной канал есть кросс-корреляция:
+Начнём с честного числа. Изображение $224 \times 224 \times 3$ — это вектор длиной $150\,528$. Первый скрытый слой MLP шириной $4096$ потребует
 
 $$
-y_{c,i,j} \;=\; \sum_{c'=1}^{C_{\text{in}}} \sum_{u=0}^{k-1} \sum_{v=0}^{k-1}
-W_{c, c', u, v}\, x_{c', i+u, j+v} \;+\; b_c.
+150\,528 \times 4096 = 616\,534\,016 \approx 617\text{ млн параметров}
 $$
 
-::: {.callout-tip title="Где это в DL_BOOK"}
-Глава 1 «Нейронные сети» вводит общее определение слоя как обучаемого преобразования. Свёрточные слои — это специфическая параметризация $W$, в которой большинство компонент равны нулю или связаны (weight tying).
+только в одном слое — больше, чем у GPT-2. При этом на ImageNet нужно 10–100+ миллионов обучающих примеров, чтобы такую плотную сеть не переобучить. Параметров не просто много — они используются нерационально.
+
+### 1.1 Три проблемы полносвязного подхода
+
+**Проблема 1: взрыв числа параметров.** Каждый выходной нейрон соединён со всеми входными пикселями. Удвоили разрешение — получили в четыре раза больше параметров в первом слое.
+
+**Проблема 2: игнорирование пространственной структуры.** MLP видит изображение как одномерный вектор. Для него пиксель $(0, 0)$ и пиксель $(0, 1)$ — просто два числа с разными индексами. Пространственная близость не учитывается никак.
+
+**Проблема 3: отсутствие трансляционной эквивариантности.** Кошка в левом углу и кошка в правом углу — разные векторы. MLP должен заново выучить признаки для каждой позиции, что требует огромного числа обучающих примеров.
+
+### 1.2 Inductive biases свёрточных сетей
+
+CNN решает все три проблемы через три встроенных предположения (inductive biases):
+
+| Bias | Что означает | Эффект |
+|------|--------------|--------|
+| **Локальность** | Выходной пиксель зависит от окна $k \times k$ | $O(k^2 C_{\text{in}} C_{\text{out}})$ параметров на слой |
+| **Разделение весов** | Одно ядро — для всех позиций | Параметры не растут с $H, W$ |
+| **Эквивариантность к сдвигу** | Сдвиг входа → сдвиг выхода | Одни признаки работают везде |
+
+::: {.callout-note title="Эквивариантность ≠ инвариантность"}
+**Эквивариантность** (equivariance): если сдвинуть вход, сдвинется и активационная карта. Нейрон, реагирующий на угол, будет реагировать на него везде.
+
+**Инвариантность** (invariance): выход не меняется при сдвиге. Её CNN достигает только после глобального пулинга.
+
+Для детектирования нужна эквивариантность. Для классификации — инвариантность.
 :::
 
-## 2. Receptive field и его рост
+---
 
-Receptive field (RF) выходного нейрона — множество входных пикселей, от которых он реально зависит. Для двух последовательных Conv $3{\times}3$ без stride RF растёт линейно: $1 \to 3 \to 5 \to 7$, и т.д.
+## 2. Операция свёртки: от математики к коду
 
-![Receptive field после двух Conv $3\times3$](../../figures/tikz/_build/conv-receptive.svg){#fig-rf width=85%}
+### 2.1 Кросс-корреляция — это то, что реально делает Conv2d
 
-В чистых CNN рост RF идёт через комбинацию трёх механизмов:
-
-1. **глубина** — $L$ слоёв $k{\times}k$ дают RF $\approx 1 + L(k-1)$;
-2. **stride / pooling** — каждый $\text{stride}=2$ удваивает RF на следующем шаге;
-3. **dilated convolutions** — экспоненциальный рост RF без потери разрешения.
-
-Глобальный RF всей сети не должен быть меньше характерного объекта на изображении — иначе классификатор физически не «видит» полную сцену.
-
-## 3. Residual-блок
-
-Глубокие сети без шорткатов плохо обучаются: градиент затухает или взрывается, оптимизация ландшафта становится ущельной [@he2016deep]. Решение — добавить тождественный пропуск:
+Несмотря на название, `nn.Conv2d` реализует **кросс-корреляцию**, а не математическую свёртку (которая требует отражения ядра). Для обучаемых ядер разница несущественна — модель сама выучит нужную ориентацию. Формула:
 
 $$
-y \;=\; \mathcal{F}(x; W) + x.
+y_{c_{\text{out}},\, i,\, j} \;=\;
+\sum_{c'=0}^{C_{\text{in}}-1}
+\sum_{u=0}^{k-1}
+\sum_{v=0}^{k-1}
+W_{c_{\text{out}},\, c',\, u,\, v}\;
+x_{c',\; i\cdot s + u,\; j\cdot s + v}
+\;+\; b_{c_{\text{out}}}
 $$
 
-Слой обучается *смещению* от identity, а не полному преобразованию. Это и упрощает оптимизацию (близко к нулю при инициализации), и улучшает протекание градиента: $\partial y / \partial x = I + \partial \mathcal{F} / \partial x$.
+где $s$ — stride (шаг скользящего окна), $k$ — размер ядра, $C_{\text{in}}, C_{\text{out}}$ — входные и выходные каналы.
 
-![Базовый residual-блок (BasicBlock из ResNet-18)](../../figures/tikz/_build/residual.svg){#fig-resnet width=80%}
-
-::: {.callout-warning}
-Skip-connection требует, чтобы $\mathcal{F}(x)$ имел ту же форму, что $x$. Если меняется число каналов или пространственное разрешение — применяется $1{\times}1$ свёртка с stride на shortcut-ветке (downsample-блок).
-:::
-
-## 4. Нормализации: BN, LN, IN, GN, RMSNorm
-
-В свёрточных сетях BatchNorm [@ioffe2015batch] долго был стандартом. С приходом transformer-эры доминирует LayerNorm [@ba2016layer]. Между ними есть целый зоопарк промежуточных вариантов, и важно понимать, **по какой оси** усредняются $\mu, \sigma$ в каждом из них:
-
-![BN / LN / IN / GN / RMSNorm — подсвечена область усреднения](../../figures/tikz/_build/normalization.svg){#fig-norm width=100%}
-
-Общая форма для каждого из них одинаковая:
+Размер выходной карты:
 
 $$
-\hat{x} = \frac{x - \mu}{\sqrt{\sigma^2 + \varepsilon}}, \qquad
-y = \gamma \hat{x} + \beta.
+H_{\text{out}} = \left\lfloor \frac{H_{\text{in}} + 2p - d(k-1) - 1}{s} + 1 \right\rfloor
 $$
 
-Различие — *над какими измерениями* считаются $\mu$ и $\sigma$:
+где $p$ — padding, $d$ — dilation.
 
-| Норма | $\mu$ берётся по | Где живёт |
-|-------|------------------|-----------|
-| **BatchNorm** | $N \times H \times W$ для каждого канала $c$ | классические CNN |
-| **LayerNorm** | $C \times H \times W$ для каждого образца $n$ | transformer-подобные |
-| **InstanceNorm** | $H \times W$ для каждой пары $(n, c)$ | style transfer, GAN |
-| **GroupNorm** | $H \times W \times G$ внутри группы каналов [@wu2018group] | малые батчи, detection |
-| **RMSNorm** | без $\mu$, только $\mathrm{RMS}_n$ | LLaMA-семейство |
+### 2.2 Параметры Conv2d и их смысл
 
-::: {.callout-note title="Важно"}
-BatchNorm имеет **разное поведение** на train и eval (running stats), и плохо ведёт себя при batch size 1–4. Если у тебя малый батч (детектирование, сегментация на больших картинках) — почти всегда лучше GroupNorm.
-:::
+**Stride** $(s)$ — шаг сдвига ядра. При $s=2$ выход уменьшается в два раза. Используется вместо pooling в современных архитектурах (strided convolution).
 
-## 5. Аугментации: дешёвая регуляризация
+**Padding** управляет тем, что происходит на границах:
 
-CNN склонны переобучаться на инвариантности, которых нет в данных. Решение — синтетически расширить обучающую выборку через преобразования, инвариантные к задаче:
+- `padding='valid'` — без паддинга, выход меньше входа
+- `padding='same'` — выход того же размера, что вход (при $s=1$)
+- `padding_mode='reflect'` — отражение вместо нулей, лучше для изображений
 
-- **Геометрические:** flip, rotation, crop, perspective, elastic deform
-- **Фотометрические:** brightness, contrast, hue, gamma, blur, noise
-- **Mix-методы:** Cutout, Mixup, CutMix, RandAugment, AugMix
-
-Все они в курсе живут через [Albumentations](https://albumentations.ai). Семинар 04 ставит задачу подобрать такой набор, который улучшает baseline ResNet-18 на TinyImageNet хотя бы на 2 п.п.
+**Dilation** $(d)$ — «дырявая» свёртка. Ядро применяется с пропусками через $d-1$ пикселей. При $d=2$, $k=3$ рецептивное поле $5 \times 5$, но параметров только $3 \times 3 = 9$.
 
 ```python
-import albumentations as A
+import torch.nn as nn
 
-train_tf = A.Compose([
-    A.RandomResizedCrop(64, 64, scale=(0.7, 1.0)),
-    A.HorizontalFlip(p=0.5),
-    A.ColorJitter(0.2, 0.2, 0.2, 0.05, p=0.7),
-    A.CoarseDropout(max_holes=4, max_height=16, max_width=16, p=0.5),
-    A.Normalize(),
+# Стандартный Conv2d
+conv = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3,
+                 stride=1, padding=1)  # padding=1 → 'same' при stride=1
+
+# Dilated conv с dilation=2
+conv_dil = nn.Conv2d(3, 64, kernel_size=3, dilation=2, padding=2)
+
+# Strided (заменяет MaxPool2d)
+conv_stride = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+```
+
+### 2.3 Receptive field: как считать для стека 3×3
+
+Рецептивное поле (RF) — это область входного изображения, от которой зависит один выходной нейрон.
+
+Для $L$ последовательных Conv $k \times k$ без stride и dilation:
+
+$$
+\text{RF}_L = 1 + L \cdot (k - 1)
+$$
+
+Для $k=3$: $L=1 \Rightarrow \text{RF}=3$, $L=2 \Rightarrow \text{RF}=5$, $L=5 \Rightarrow \text{RF}=11$, $L=16 \Rightarrow \text{RF}=33$.
+
+Почему стек $3 \times 3$ лучше одного большого ядра? Два Conv $3 \times 3$ дают тот же RF, что один Conv $5 \times 5$, но:
+
+- параметров: $2 \times 3^2 = 18$ против $5^2 = 25$
+- нелинейностей: 2 вместо 1 (между слоями стоит ReLU)
+
+Это ключевой insight из VGG (2014).
+
+![Рост receptive field после двух Conv $3\times3$](../../figures/tikz/_build/conv-receptive.svg){#fig-rf width=85%}
+
+При добавлении stride $s$ или MaxPool $2 \times 2$ рецептивное поле последующих слоёв удваивается:
+
+$$
+\text{RF}_{\text{effective}} = \text{RF}_{\text{before}} \cdot s_{\text{cumulative}}
+$$
+
+Именно поэтому типичные CNN имеют 5 stage с downsample $\times 2$ на каждом — итоговый stride 32 соответствует RF порядка $\sim 200$ пикселей для сети глубиной 50 слоёв.
+
+---
+
+## 3. Pooling: агрегация пространственных признаков
+
+### 3.1 MaxPool и AvgPool
+
+```python
+# MaxPool2d: берёт максимум в окне
+pool = nn.MaxPool2d(kernel_size=2, stride=2)  # уменьшает H,W в 2 раза
+
+# AvgPool2d: среднее по окну
+avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+```
+
+**MaxPool** сохраняет самый сильный сигнал в окне. Хорош для текстурных признаков. **AvgPool** сохраняет средний сигнал — более гладкий, лучше для финальной агрегации.
+
+### 3.2 Adaptive Pooling — решение для произвольного входа
+
+Проблема: классические сети фиксируют размер входа ($224 \times 224$). Решение — адаптивный пулинг:
+
+```python
+# Всегда выдаёт выход 7×7, независимо от размера входа
+adaptive = nn.AdaptiveAvgPool2d(output_size=(7, 7))
+
+# Global Average Pooling: схлопывает H,W до 1×1
+gap = nn.AdaptiveAvgPool2d(1)  # (B, C, H, W) → (B, C, 1, 1)
+```
+
+### 3.3 Global Average Pooling как classifier head
+
+В современных архитектурах (ResNet и позднее) классификационная голова строится через GAP:
+
+```python
+class ClassifierHead(nn.Module):
+    def __init__(self, in_channels: int, num_classes: int):
+        super().__init__()
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(in_channels, num_classes)
+
+    def forward(self, x):
+        x = self.gap(x)          # (B, C, H, W) → (B, C, 1, 1)
+        x = x.flatten(1)          # (B, C)
+        return self.fc(x)
+```
+
+GAP вместо `Flatten + FC` даёт ряд преимуществ:
+
+- намного меньше параметров (нет огромной матрицы $C \cdot H \cdot W \times d$)
+- допускает любой размер входа при инференсе
+- встроенная регуляризация через усреднение
+
+---
+
+## 4. Batch Normalization в CNN
+
+### 4.1 Особенности BN для свёрточных карт
+
+В CNN BatchNorm нормализует **по каналам**: для каждого канала $c$ считается среднее по батчу $N$ и пространству $H \times W$:
+
+$$
+\mu_c = \frac{1}{N \cdot H \cdot W} \sum_{n, i, j} x_{n, c, i, j},
+\qquad
+\sigma_c^2 = \frac{1}{N \cdot H \cdot W} \sum_{n, i, j} (x_{n, c, i, j} - \mu_c)^2
+$$
+
+Обучаемые параметры $\gamma_c, \beta_c$ — **одна пара на канал**, а не на пиксель. Это важно: BN в CNN работает как нормализация статистики фичи, общей для всего изображения.
+
+```python
+# Для CNN: num_features = C (число каналов)
+bn = nn.BatchNorm2d(num_features=64)
+# Хранит running_mean и running_var формы (64,)
+```
+
+### 4.2 Train vs Eval режим
+
+::: {.callout-warning title="BatchNorm имеет состояние"}
+При `model.train()` BN считает статистики по текущему батчу и обновляет running stats с momentum 0.1.
+
+При `model.eval()` BN использует накопленные running_mean / running_var — фиксированные, не зависящие от батча.
+
+Если забыть `model.eval()` — метрики будут считаться в train-режиме, что даёт нечестно оптимистичный результат при большом батче и пессимистичный при малом.
+:::
+
+### 4.3 Когда BN не работает
+
+BN плохо работает при малом batch size ($< 8$):
+
+- статистики $\mu_c, \sigma_c^2$ нестабильны
+- это проблема для детектирования и сегментации на больших картинках
+
+Альтернативы: **GroupNorm** (нормализует группы каналов независимо от батча) или **LayerNorm** (нормализует всё кроме батча).
+
+```python
+# GroupNorm: num_groups=32 — хорошее умолчание
+gn = nn.GroupNorm(num_groups=32, num_channels=256)
+
+# Работает при batch_size=1, нет зависимости от N
+```
+
+---
+
+## 5. Современные блоки свёртки
+
+### 5.1 Depthwise Separable Convolution (MobileNet)
+
+Идея: разделить стандартную свёртку на два этапа.
+
+**Стандартная свёртка** $3 \times 3$, $C_{\text{in}} \to C_{\text{out}}$:
+$$
+\text{Params} = k^2 \cdot C_{\text{in}} \cdot C_{\text{out}} = 9 C_{\text{in}} C_{\text{out}}
+$$
+
+**Depthwise Separable** = Depthwise Conv + Pointwise Conv:
+$$
+\text{Params} = k^2 \cdot C_{\text{in}} + C_{\text{in}} \cdot C_{\text{out}} = C_{\text{in}}(k^2 + C_{\text{out}})
+$$
+
+Отношение: $\frac{k^2 + C_{\text{out}}}{k^2 \cdot C_{\text{out}}} \approx \frac{1}{k^2} = \frac{1}{9}$ при больших $C_{\text{out}}$. Сжатие параметров примерно в 9 раз при $k=3$.
+
+```python
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
+        super().__init__()
+        self.dw = nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=stride,
+                            padding=1, groups=in_ch, bias=False)  # depthwise
+        self.pw = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False)  # pointwise
+        self.bn1 = nn.BatchNorm2d(in_ch)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU6()
+
+    def forward(self, x):
+        x = self.act(self.bn1(self.dw(x)))
+        x = self.act(self.bn2(self.pw(x)))
+        return x
+```
+
+### 5.2 Grouped Convolution (ResNeXt)
+
+`groups=g` делит каналы на $g$ независимых групп, каждая свёртывается отдельно:
+
+$$
+\text{Params} = \frac{k^2 \cdot C_{\text{in}} \cdot C_{\text{out}}}{g}
+$$
+
+В ResNeXt grouped conv с $g=32$ при той же ёмкости модели даёт лучшее качество, чем просто увеличение ширины ResNet.
+
+```python
+# ResNeXt: 32 группы, bottleneck width=4d
+grouped_conv = nn.Conv2d(256, 256, kernel_size=3,
+                         padding=1, groups=32, bias=False)
+```
+
+::: {.callout-note title="Частный случай: depthwise"}
+`groups=in_channels` — это и есть depthwise convolution. MobileNet использует $g = C_{\text{in}}$, ResNeXt — меньшее $g$ (обычно 32).
+:::
+
+### 5.3 Channel Attention: Squeeze-and-Excitation (SENet)
+
+SENet добавляет к блоку механизм attention по каналам:
+
+$$
+s = \sigma\!\left(W_2\,\delta\!\left(W_1\,\text{GAP}(x)\right)\right),
+\qquad
+\hat{x} = x \odot s
+$$
+
+где $\text{GAP}$ — global average pooling, $W_1 \in \mathbb{R}^{C/r \times C}$, $W_2 \in \mathbb{R}^{C \times C/r}$, $r$ — коэффициент редукции (обычно 16).
+
+```python
+class SEBlock(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.shape
+        s = self.squeeze(x).view(b, c)           # (B, C)
+        s = self.excitation(s).view(b, c, 1, 1)  # (B, C, 1, 1)
+        return x * s                              # масштабирование каналов
+```
+
+### 5.4 CBAM: Convolutional Block Attention Module
+
+CBAM расширяет идею SE-блока, добавляя пространственный attention:
+
+```python
+import torch
+
+class CBAM(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16, kernel_size: int = 7):
+        super().__init__()
+        # Channel attention (как SE)
+        self.channel_att = SEBlock(channels, reduction)
+        # Spatial attention
+        self.spatial_att = nn.Sequential(
+            nn.Conv2d(2, 1, kernel_size=kernel_size,
+                      padding=kernel_size // 2, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        x = self.channel_att(x)
+        avg_out = x.mean(dim=1, keepdim=True)
+        max_out = x.max(dim=1, keepdim=True).values
+        spatial = self.spatial_att(torch.cat([avg_out, max_out], dim=1))
+        return x * spatial
+```
+
+---
+
+## 6. Ключевые архитектуры
+
+### 6.1 VGG: принцип однородной глубины
+
+VGG (Simonyan & Zisserman, 2014) установила два простых принципа:
+
+1. Используй только $3 \times 3$ conv (стек даёт то же RF, что большие ядра, но дешевле)
+2. После каждого MaxPool удваивай число каналов: $64 \to 128 \to 256 \to 512$
+
+Это сохраняет примерно постоянный объём вычислений на каждом stage (пространство уменьшается вдвое, каналов вдвое больше — FLOPs те же).
+
+```
+VGG-16 (14.7M params в conv, 124M в FC):
+Stage 1: 2× Conv(3,64)   → MaxPool → 112×112×64
+Stage 2: 2× Conv(64,128) → MaxPool → 56×56×128
+Stage 3: 3× Conv(128,256)→ MaxPool → 28×28×256
+Stage 4: 3× Conv(256,512)→ MaxPool → 14×14×512
+Stage 5: 3× Conv(512,512)→ MaxPool → 7×7×512
+Head: Flatten → FC(25088, 4096) → FC(4096, 4096) → FC(4096, 1000)
+```
+
+::: {.callout-warning title="Проблема VGG"}
+Три огромных FC-слоя содержат ~120M параметров из 138M всей модели. В современных архитектурах FC заменяется GAP — экономия на два порядка без потери качества.
+:::
+
+### 6.2 ResNet: победа над деградацией
+
+**Проблема деградации:** при увеличении глубины сети точность на обучении начинает падать. Это не переобучение (test тоже хуже train). Ошибка оптимизации.
+
+**Гипотеза He et al. (2016):** обучать остаток проще, чем полное преобразование. Если оптимальное преобразование близко к identity — то остаток $\mathcal{F}(x) = H(x) - x$ близок к нулю, и его легко обнулить градиентным спуском.
+
+$$
+\boxed{H(x) = \mathcal{F}(x;\,W) + x}
+$$
+
+![Residual block](../../figures/tikz/_build/residual.svg){#fig-resnet width=85%}
+
+**Почему это работает — два взгляда:**
+
+1. **Градиентный поток:** $\frac{\partial \mathcal{L}}{\partial x} = \frac{\partial \mathcal{L}}{\partial H} \cdot \left(I + \frac{\partial \mathcal{F}}{\partial x}\right)$. Тождественный член $I$ гарантирует, что градиент всегда «протекает» через любую глубину без затухания.
+
+2. **Ансамблевый взгляд (Veit et al., 2016):** ResNet с $n$ блоками порождает $2^n$ различных путей от входа до выхода. Сеть работает как ансамбль путей разной длины.
+
+#### 6.2.1 BasicBlock (ResNet-18, ResNet-34)
+
+```python
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride,
+                               padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+
+        # Downsample shortcut при изменении размерности
+        self.downsample = None
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+
+    def forward(self, x):
+        identity = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out = self.act(out + identity)   # F(x) + x
+        return out
+```
+
+#### 6.2.2 Bottleneck (ResNet-50, ResNet-101, ResNet-152)
+
+Для глубоких сетей 3-слойный Bottleneck эффективнее BasicBlock:
+
+```
+1×1 Conv (C → C/4)   — снижает размерность, дёшево
+3×3 Conv (C/4 → C/4) — пространственная свёртка в узком пространстве
+1×1 Conv (C/4 → C)   — восстанавливает размерность
+```
+
+```python
+class Bottleneck(nn.Module):
+    expansion = 4  # выходных каналов в 4 раза больше входных
+
+    def __init__(self, in_ch: int, bottleneck_ch: int, stride: int = 1):
+        super().__init__()
+        out_ch = bottleneck_ch * self.expansion
+        self.conv1 = nn.Conv2d(in_ch, bottleneck_ch, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(bottleneck_ch)
+        self.conv2 = nn.Conv2d(bottleneck_ch, bottleneck_ch, 3,
+                               stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(bottleneck_ch)
+        self.conv3 = nn.Conv2d(bottleneck_ch, out_ch, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+        self.downsample = None
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+
+    def forward(self, x):
+        identity = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.act(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out = self.act(out + identity)
+        return out
+```
+
+#### 6.2.3 ResNet-50 детально
+
+```
+Input: 224×224×3
+Stem:  Conv(3,64,7×7,s=2) → BN → ReLU → MaxPool(3×3,s=2) → 56×56×64
+
+Stage 1: 3× Bottleneck(64→256)    → 56×56×256   [stride=1]
+Stage 2: 4× Bottleneck(256→512)   → 28×28×512   [stride=2 первый]
+Stage 3: 6× Bottleneck(512→1024)  → 14×14×1024  [stride=2 первый]
+Stage 4: 3× Bottleneck(1024→2048) → 7×7×2048    [stride=2 первый]
+
+Head: GAP → Linear(2048, 1000)
+
+Итого: ~25.6M параметров, 4.1 GFLOPs
+```
+
+### 6.3 EfficientNet: compound scaling
+
+Обычно масштабируют одно измерение: глубину (ResNet-152), ширину (WideResNet) или разрешение. Tan & Le (2019) предложили масштабировать все три одновременно:
+
+$$
+d = \alpha^\phi, \quad w = \beta^\phi, \quad r = \gamma^\phi
+$$
+
+$$
+\text{при условии} \quad \alpha \cdot \beta^2 \cdot \gamma^2 \approx 2, \quad \alpha, \beta, \gamma \geq 1
+$$
+
+где $\phi$ — коэффициент масштаба, $\alpha, \beta, \gamma$ — найденные NAS-поиском. Удвоение FLOPs ($\phi \to \phi+1$) улучшает точность значительно лучше, чем удвоение только глубины или ширины.
+
+```python
+import timm
+
+# EfficientNet-B0 до B7 — разные phi
+model_b0 = timm.create_model('efficientnet_b0', pretrained=True, num_classes=10)
+model_b4 = timm.create_model('efficientnet_b4', pretrained=True, num_classes=10)
+```
+
+### 6.4 ConvNeXt: «модернизация» ResNet шаг за шагом
+
+Liu et al. (2022) взяли ResNet-50 и применили к нему идеи из Vision Transformer, шаг за шагом, измеряя влияние каждого изменения:
+
+| Изменение | Top-1 на ImageNet |
+|-----------|-------------------|
+| ResNet-50 baseline | 76.1% |
+| + обучение 300 эпох (AdamW, cosine, mixup...) | 78.8% |
+| + stride=4 patchify stem (вместо 7×7+MaxPool) | 79.4% |
+| + ResNeXt-ify: grouped conv → depthwise | 79.3% |
+| + inverted bottleneck (MobileNet-V2 style) | 79.9% |
+| + larger kernel: 7×7 depthwise | 80.6% |
+| + LayerNorm вместо BatchNorm | 81.5% |
+| + GELU вместо ReLU | 81.3% |
+| + fewer activations / norms | 81.4% |
+| + separate downsampling layers | 82.0% |
+
+**Итого**: ConvNeXt-T/S/B/L — чисто свёрточные сети, превосходящие или равные Swin Transformer при той же ёмкости.
+
+```python
+import torch
+import torch.nn as nn
+
+class ConvNeXtBlock(nn.Module):
+    """Упрощённый ConvNeXt block."""
+    def __init__(self, dim: int, layer_scale: float = 1e-6):
+        super().__init__()
+        self.dw_conv = nn.Conv2d(dim, dim, kernel_size=7, padding=3,
+                                 groups=dim)                    # depthwise 7×7
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.pw1 = nn.Linear(dim, 4 * dim)                     # inverted bottleneck
+        self.act = nn.GELU()
+        self.pw2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(
+            layer_scale * torch.ones(dim)) if layer_scale > 0 else None
+
+    def forward(self, x):
+        shortcut = x
+        x = self.dw_conv(x)                             # (B,C,H,W)
+        x = x.permute(0, 2, 3, 1)                      # (B,H,W,C) для LayerNorm
+        x = self.norm(x)
+        x = self.pw2(self.act(self.pw1(x)))             # MLP в channel dim
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 3, 1, 2)                      # (B,C,H,W)
+        return x + shortcut
+
+# Или через timm:
+model = timm.create_model('convnext_tiny', pretrained=True, num_classes=10)
+```
+
+---
+
+## 7. Transfer Learning с CNN
+
+### 7.1 Pretraining на ImageNet как lingua franca
+
+ImageNet-1k (1.28M изображений, 1000 классов) — стандартный pre-training датасет для CV. Признаки, выученные на нём, хорошо переносятся на другие задачи, потому что иерархия визуальных признаков (края → текстуры → части объектов → объекты) универсальна.
+
+```python
+import timm
+
+# Загрузить претренированную модель
+model = timm.create_model('resnet50', pretrained=True)
+
+# Посмотреть доступные модели
+print(timm.list_models('resnet*')[:10])
+```
+
+### 7.2 Feature extraction vs fine-tuning
+
+**Feature extraction:** заморозить все слои кроме классификатора. Быстро, мало памяти, хорошо работает когда целевой домен близок к ImageNet.
+
+```python
+# Заморозить backbone
+for param in model.parameters():
+    param.requires_grad = False
+
+# Заменить голову
+in_features = model.fc.in_features
+model.fc = nn.Linear(in_features, num_classes)
+# Только параметры fc.weight и fc.bias будут обновляться
+```
+
+**Fine-tuning:** обновлять все параметры, но с маленьким learning rate. Лучше для специфических доменов (медицина, спутниковые снимки, промышленные дефекты).
+
+### 7.3 Стратегии заморозки слоёв
+
+Часто используют **постепенное размораживание** (progressive unfreezing): сначала обучают только голову, затем отмораживают последний stage, затем все:
+
+```python
+def freeze_backbone(model, freeze: bool) -> None:
+    for name, param in model.named_parameters():
+        if 'fc' not in name and 'head' not in name:
+            param.requires_grad = not freeze
+
+# Фаза 1: только голова
+freeze_backbone(model, freeze=True)
+optimizer = torch.optim.AdamW(
+    filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
+
+# Фаза 2: весь backbone с differential LR
+freeze_backbone(model, freeze=False)
+optimizer = torch.optim.AdamW([
+    {'params': model.layer4.parameters(), 'lr': 1e-4},
+    {'params': model.layer3.parameters(), 'lr': 5e-5},
+    {'params': model.layer2.parameters(), 'lr': 2e-5},
+    {'params': model.layer1.parameters(), 'lr': 1e-5},
+    {'params': model.fc.parameters(),    'lr': 1e-3},
 ])
 ```
 
-## 6. Что делать дальше
+### 7.4 Differential learning rate
+
+Идея: ранние слои выучили универсальные признаки (края, текстуры) — их надо почти не трогать. Поздние слои специфичны для задачи — их обновляют активнее.
+
+Типичная эвристика — коэффициент затухания `layer_decay` от головы к стему (обычно $0.65$–$0.85$):
+
+```python
+def build_layerwise_params(model: nn.Module, base_lr: float,
+                           layer_decay: float = 0.75) -> list[dict]:
+    """Назначает убывающий LR от головы к стему."""
+    stage_names = ['layer1', 'layer2', 'layer3', 'layer4']
+    groups = []
+    for depth, stage in enumerate(reversed(stage_names)):
+        lr = base_lr * (layer_decay ** depth)
+        stage_params = [p for n, p in model.named_parameters()
+                        if stage in n and p.requires_grad]
+        if stage_params:
+            groups.append({'params': stage_params, 'lr': lr})
+    # Голова
+    head_params = [p for n, p in model.named_parameters()
+                   if 'fc' in n or 'head' in n]
+    groups.append({'params': head_params, 'lr': base_lr})
+    return groups
+
+optimizer = torch.optim.AdamW(
+    build_layerwise_params(model, base_lr=1e-3, layer_decay=0.75))
+```
+
+---
+
+## 8. Аугментации данных
+
+### 8.1 Базовые геометрические и фотометрические
+
+```python
+import torchvision.transforms.v2 as T
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+# torchvision v2 (PyTorch 2.0+)
+train_transform = T.Compose([
+    T.RandomResizedCrop(224, scale=(0.08, 1.0)),
+    T.RandomHorizontalFlip(p=0.5),
+    T.ColorJitter(brightness=0.4, contrast=0.4,
+                  saturation=0.4, hue=0.1),
+    T.RandomGrayscale(p=0.2),
+    T.RandomErasing(p=0.25),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])
+
+# Albumentations — лучший выбор для сложных pipeline
+train_alb = A.Compose([
+    A.RandomResizedCrop(224, 224, scale=(0.08, 1.0)),
+    A.HorizontalFlip(p=0.5),
+    A.ColorJitter(brightness=0.4, contrast=0.4,
+                  saturation=0.4, hue=0.1, p=0.8),
+    A.ToGray(p=0.2),
+    A.GaussianBlur(blur_limit=(3, 7), p=0.3),
+    A.CoarseDropout(max_holes=8, max_height=32,
+                    max_width=32, p=0.5),
+    A.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+    ToTensorV2(),
+])
+```
+
+### 8.2 Mixup и CutMix
+
+**Mixup** (Zhang et al., 2018): линейная интерполяция двух примеров:
+
+$$
+\tilde{x} = \lambda x_i + (1-\lambda) x_j, \qquad
+\tilde{y} = \lambda y_i + (1-\lambda) y_j,
+\qquad \lambda \sim \text{Beta}(\alpha, \alpha)
+$$
+
+**CutMix** (Yun et al., 2019): вырезает прямоугольную область из одного изображения и вставляет из другого, метки смешиваются пропорционально площади.
+
+```python
+import random
+import torchvision.transforms.v2 as T
+
+# Mixup + CutMix через torchvision v2
+cutmix = T.CutMix(num_classes=num_classes, alpha=1.0)
+mixup  = T.MixUp(num_classes=num_classes, alpha=0.2)
+
+def apply_mix(images, labels):
+    if random.random() < 0.5:
+        return cutmix(images, labels)
+    return mixup(images, labels)
+```
+
+::: {.callout-tip title="Mixup и CutMix в training loop"}
+```python
+for images, labels in train_loader:
+    images, labels = images.to(device), labels.to(device)
+    images, mixed_labels = apply_mix(images, labels)  # labels → soft
+
+    outputs = model(images)
+    # CrossEntropyLoss принимает soft labels через F.cross_entropy
+    loss = torch.nn.functional.cross_entropy(outputs, mixed_labels)
+    ...
+```
+:::
+
+### 8.3 AutoAugment и RandAugment
+
+**RandAugment** (Cubuk et al., 2020): случайно применяет $N$ операций из набора (rotate, equalize, posterize, ...) с единым параметром силы $M$.
+
+```python
+# torchvision
+transform = T.Compose([
+    T.RandAugment(num_ops=2, magnitude=9),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])
+
+# Albumentations
+aug = A.RandAugment(n=2, m=9, p=1.0)
+```
+
+**TrivialAugmentWide** — ещё проще: одна операция, случайная сила:
+
+```python
+transform = T.TrivialAugmentWide()  # работает в torchvision v2
+```
+
+::: {.callout-note title="Когда что использовать"}
+- **RandomResizedCrop + Flip** — минимальный baseline, всегда включай
+- **ColorJitter** — почти всегда полезен для RGB-изображений
+- **RandAugment / TrivialAugmentWide** — хороший default без тюнинга
+- **Mixup / CutMix** — +1–2 п.п. на ImageNet, особенно при длинном обучении
+- **AutoAugment** — оптимизирован под конкретный датасет, иногда лучше RandAugment
+:::
+
+---
+
+## 9. Практика обучения CNN
+
+### 9.1 Learning rate finder
+
+Перед обучением найдём хороший LR экспоненциальным сканированием:
+
+```python
+import torch
+
+def lr_find(model, loader, criterion, start_lr: float = 1e-7,
+            end_lr: float = 1.0, num_steps: int = 100,
+            beta: float = 0.98):
+    """Запускает LR Finder и возвращает список (lrs, losses)."""
+    model.train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=start_lr)
+    lrs, losses, avg_loss = [], [], 0.0
+    mult = (end_lr / start_lr) ** (1 / num_steps)
+
+    for step, (x, y) in enumerate(loader):
+        if step >= num_steps:
+            break
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(x), y)
+        loss.backward()
+        optimizer.step()
+
+        avg_loss = beta * avg_loss + (1 - beta) * loss.item()
+        smooth_loss = avg_loss / (1 - beta ** (step + 1))
+        lrs.append(optimizer.param_groups[0]['lr'])
+        losses.append(smooth_loss)
+
+        for g in optimizer.param_groups:
+            g['lr'] *= mult
+
+    return lrs, losses
+```
+
+### 9.2 OneCycleLR
+
+Супер-конвергенция: быстро поднимаем LR до максимума, затем снижаем:
+
+```python
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9,
+                             weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=0.1,               # пик LR (найден LR finder)
+    epochs=epochs,
+    steps_per_epoch=len(train_loader),
+    pct_start=0.3,            # 30% — рост, 70% — спад
+    anneal_strategy='cos',
+    div_factor=25.0,          # start_lr = max_lr / 25
+    final_div_factor=1e4,     # end_lr = start_lr / 1e4
+)
+
+# В training loop:
+for x, y in train_loader:
+    loss = criterion(model(x), y)
+    loss.backward()
+    optimizer.step()
+    scheduler.step()    # вызывается на каждый батч, не на эпоху!
+    optimizer.zero_grad()
+```
+
+### 9.3 Gradient clipping
+
+Важно для глубоких сетей и при смешанной точности:
+
+```python
+scaler = torch.amp.GradScaler('cuda')
+
+for x, y in train_loader:
+    optimizer.zero_grad()
+    with torch.amp.autocast('cuda'):
+        loss = criterion(model(x), y)
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    # Clip по норме градиента
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    scaler.step(optimizer)
+    scaler.update()
+```
+
+### 9.4 Диагностика: overfit on batch
+
+Перед полным обучением убедитесь, что модель вообще способна обучиться:
+
+```python
+def overfit_batch(model, loader, criterion, optimizer, steps: int = 200):
+    """Если loss не падает до ~0 — проблема в архитектуре/коде."""
+    x, y = next(iter(loader))
+    x, y = x.to(device), y.to(device)
+    model.train()
+    for step in range(steps):
+        optimizer.zero_grad()
+        loss = criterion(model(x), y)
+        loss.backward()
+        optimizer.step()
+        if step % 50 == 0:
+            print(f"Step {step}: loss={loss.item():.4f}")
+    return loss.item()
+
+# Ожидаем: loss → 0 за ~100–200 шагов
+# Если нет → баг в forward(), неправильный criterion, плохая LR
+```
+
+::: {.callout-warning title="Типичные причины плохого overfit-on-batch"}
+1. Забыли `model.train()` — BN/Dropout в eval режиме
+2. Loss считается по-другому (метки не те, неправильная размерность)
+3. LR слишком маленький (попробуй $10^{-2}$–$10^{-1}$)
+4. Gradient vanishing — проверь нормы градиентов
+5. Инициализация весов: нестандартные блоки могут требовать явной инициализации
+:::
+
+---
+
+## 10. timm: библиотека моделей
+
+### 10.1 Базовое использование
+
+```python
+import timm
+
+# Список всех доступных моделей (>700)
+all_models = timm.list_models()
+print(len(all_models))  # > 700
+
+# Поиск по паттерну
+resnet_models = timm.list_models('resnet*', pretrained=True)
+
+# Создание модели
+model = timm.create_model(
+    'resnet50',
+    pretrained=True,
+    num_classes=10,      # заменяет финальный FC
+    drop_rate=0.2,       # dropout перед головой
+    global_pool='avg',   # тип финального пулинга
+)
+
+# Инференс
+model.eval()
+x = torch.randn(1, 3, 224, 224)
+with torch.no_grad():
+    out = model(x)  # (1, 10)
+```
+
+### 10.2 Feature extraction с features_only=True
+
+```python
+# Получаем промежуточные карты признаков (для детектирования, сегментации)
+backbone = timm.create_model(
+    'resnet50',
+    pretrained=True,
+    features_only=True,           # возвращает список feature maps
+    out_indices=(2, 3, 4),        # stage 3, 4, 5 (C3, C4, C5)
+)
+
+x = torch.randn(1, 3, 224, 224)
+features = backbone(x)
+for i, f in enumerate(features):
+    print(f"C{i+3}: {f.shape}")
+# C3: torch.Size([1, 512, 28, 28])
+# C4: torch.Size([1, 1024, 14, 14])
+# C5: torch.Size([1, 2048, 7, 7])
+```
+
+### 10.3 Полный паттерн fine-tuning
+
+```python
+import timm
+import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import OneCycleLR
+
+NUM_CLASSES = 200
+EPOCHS = 30
+device = torch.device('cuda')
+
+# 1. Создать модель
+model = timm.create_model('convnext_tiny', pretrained=True,
+                          num_classes=NUM_CLASSES)
+model = model.to(device)
+
+# 2. Data config из timm
+data_config = timm.data.resolve_model_data_config(model)
+train_transform = timm.data.create_transform(**data_config, is_training=True)
+val_transform = timm.data.create_transform(**data_config, is_training=False)
+
+# 3. Optimizer: weight decay только к weights, не к biases/norms
+no_decay = ['bias', 'LayerNorm', 'layer_norm', 'norm']
+params = [
+    {'params': [p for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)],
+     'weight_decay': 0.05},
+    {'params': [p for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)],
+     'weight_decay': 0.0},
+]
+optimizer = torch.optim.AdamW(params, lr=4e-3)
+
+# 4. Scheduler
+scheduler = OneCycleLR(optimizer, max_lr=4e-3,
+                       epochs=EPOCHS, steps_per_epoch=len(train_loader))
+
+# 5. Training loop с AMP
+scaler = torch.amp.GradScaler('cuda')
+
+for epoch in range(EPOCHS):
+    model.train()
+    for x, y in train_loader:
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        with torch.amp.autocast('cuda'):
+            logits = model(x)
+            loss = nn.CrossEntropyLoss(label_smoothing=0.1)(logits, y)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+```
+
+### 10.4 Полезные утилиты timm
+
+```python
+# Информация о модели
+model = timm.create_model('resnet50', pretrained=False)
+
+# Число параметров
+n_params = sum(p.numel() for p in model.parameters())
+print(f"Params: {n_params / 1e6:.1f}M")  # Params: 25.6M
+
+# default_cfg: mean, std, input_size, interpolation, ...
+print(model.default_cfg)
+
+# EMA модели — сглаживание весов для лучшей обобщаемости
+from timm.utils import ModelEmaV2
+ema = ModelEmaV2(model, decay=0.9998)
+
+for x, y in train_loader:
+    # ... обучение ...
+    ema.update(model)       # обновляем EMA после каждого шага
+
+# Валидация через EMA
+ema_model = ema.module
+ema_model.eval()
+```
+
+---
+
+## 11. Сводная таблица архитектур
+
+| Модель | Год | Params | Top-1 | Ключевая идея |
+|--------|-----|--------|-------|---------------|
+| VGG-16 | 2014 | 138M | 71.5% | Стек 3×3, однородность |
+| ResNet-50 | 2015 | 25.6M | 76.1% | Residual connections |
+| ResNeXt-50 | 2017 | 25.0M | 77.8% | Grouped conv, cardinality |
+| SE-ResNet-50 | 2018 | 28.1M | 78.4% | Channel attention |
+| EfficientNet-B0 | 2019 | 5.3M | 77.1% | Compound scaling |
+| EfficientNet-B4 | 2019 | 19M | 82.6% | Compound scaling (больше) |
+| ConvNeXt-T | 2022 | 28M | 82.1% | «Transformer tricks» на CNN |
+| ConvNeXt-B | 2022 | 89M | 83.8% | То же, шире |
+
+::: {.callout-tip title="Что выбрать на практике"}
+- **Быстрый прототип, мало GPU-памяти:** EfficientNet-B0 / MobileNetV3
+- **Баланс скорость/качество:** ResNet-50 или ConvNeXt-T
+- **Максимальное качество среди CNN:** ConvNeXt-B/L
+- **Downstream задачи (детектирование, сегментация):** ResNet-50 FPN, ConvNeXt как backbone
+- **Всегда используй timm** — там свежие веса и правильные augmentation configs
+:::
+
+---
+
+## 12. Что делать дальше
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/04-cnn/basic.html) / [advanced](../../seminars/04-cnn/advanced.html)): построить ResNet-18 из BasicBlock'ов, обучить на CIFAR-10, посмотреть на receptive field руками.
-- **ДЗ**: [04-cnn-zoo](../../homework/04-cnn-zoo/README.qmd) — open задача на TinyImageNet с leaderboard и judge-rubric.
+- **Семинар** ([basic](../../seminars/04-cnn/basic.html) / [advanced](../../seminars/04-cnn/advanced.html)): построить ResNet-18 из BasicBlock'ов с нуля, обучить на CIFAR-10, исследовать receptive field визуально, сравнить BatchNorm vs GroupNorm при малом батче.
+- **ДЗ**: [04-cnn-zoo](../../homework/04-cnn-zoo/README.qmd) — open-задача на TinyImageNet с leaderboard. Нужно побить baseline ResNet-18 хотя бы на 5 п.п., используя аугментации, fine-tuning и архитектурные улучшения.
 :::
 
 ::: {.callout-important title="Минимум на запоминание"}
-1. Свёртка = локальный + переиспользуемый линейный оператор.
-2. RF растёт по глубине, stride и dilation.
-3. Residual делает оптимизацию глубоких сетей возможной.
-4. Норма выбирается по оси усреднения, а не по «модности».
-5. Аугментации — самая дешёвая и эффективная регуляризация в CV.
+1. **Свёртка** = локальный + weight-sharing линейный оператор. Параметров $k^2 C_{\text{in}} C_{\text{out}}$, независимо от $H, W$.
+2. **Receptive field** растёт по глубине ($+k-1$ за слой), stride/pooling ($\times s$) и dilation ($\times d$).
+3. **Residual** $H(x) = \mathcal{F}(x) + x$ решает проблему деградации: градиент течёт через identity-путь.
+4. **Depthwise separable** сжимает параметры примерно в $k^2=9$ раз при $k=3$.
+5. **GAP** вместо Flatten+FC: любой размер входа, на порядок меньше параметров.
+6. **BN нормализует по каналу** (не по пикселю), плохо при батче < 8 — используй GroupNorm.
+7. **Transfer learning**: сначала заморозь backbone, потом fine-tune с differential LR.
+8. **Аугментации** — самая дешёвая регуляризация: Mixup/CutMix/RandAugment стандартны.
+9. **timm** содержит >700 моделей с правильными weights и configs — используй его всегда.
+10. **OneCycleLR + AMP + grad_clip** — стандартный рецепт обучения CNN.
 :::
+
+---
 
 ## Литература {.appendix}
 

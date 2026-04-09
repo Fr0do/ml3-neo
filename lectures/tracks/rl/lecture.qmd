@@ -1,39 +1,518 @@
 ---
-title: "Лекция RL — Reinforcement Learning"
-subtitle: "От Policy Gradients до RLHF"
-author: "ml3-neo"
+title: "Reinforcement Learning & RLHF"
+subtitle: "Optional Track: MDP, Policy Gradient, PPO, RLHF, GRPO — от CartPole до выравнивания LLM"
 date: last-modified
 bibliography: ../../../refs.bib
 format:
   html:
+    toc: true
+    toc-depth: 3
     code-fold: false
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это optional track по RL. Знакомит с основами обучения с подкреплением и его современным применением (RLHF).
+Это **optional track** по Reinforcement Learning и RLHF. Предполагается знание PyTorch и базовых концепций обучения. Трек ~55 минут.
 :::
 
-## 1. MDP: Марковский процесс принятия решений
-Формализм RL основан на MDP: состояние $S_t$, действие $A_t$, награда $R_t$, discount factor $\gamma$. Цель агента — максимизировать ожидаемую сумму дисконтированных наград.
+## 1. Формализм MDP
 
-## 2. Policy Gradient
-Оптимизируем саму политику $\pi_\theta(a|s)$. Метод REINFORCE использует теорему о градиенте политики. Использование baseline помогает снизить variance.
+### 1.1 Марковский процесс принятия решений
+
+**MDP** = $(S, A, P, R, \gamma)$:
+
+- $S$ — пространство состояний (states)
+- $A$ — пространство действий (actions)
+- $P(s' | s, a)$ — функция переходов (transition dynamics)
+- $R(s, a)$ — функция наград (reward function)
+- $\gamma \in [0,1)$ — коэффициент дисконтирования
+
+**Цель агента**: найти политику $\pi(a|s)$ (stochastic) или $\pi(s) \to a$ (deterministic),
+максимизирующую ожидаемую сумму дисконтированных наград:
+
+$$J(\pi) = \mathbb{E}_{\pi}\left[\sum_{t=0}^\infty \gamma^t R(s_t, a_t)\right]$$
+
+### 1.2 Value Functions
+
+**State-value function** (сколько мы ожидаем получить из состояния):
+
+$$V^\pi(s) = \mathbb{E}_\pi\left[\sum_{t=0}^\infty \gamma^t R(s_t, a_t) \;\Big|\; s_0 = s\right]$$
+
+**Action-value function** (Q-function):
+
+$$Q^\pi(s, a) = \mathbb{E}_\pi\left[\sum_{t=0}^\infty \gamma^t R(s_t, a_t) \;\Big|\; s_0 = s, a_0 = a\right]$$
+
+**Уравнение Беллмана**:
+
+$$V^\pi(s) = \sum_a \pi(a|s) \left[R(s,a) + \gamma \sum_{s'} P(s'|s,a) V^\pi(s')\right]$$
+
+**Advantage function** — насколько действие лучше среднего:
+
+$$A^\pi(s, a) = Q^\pi(s, a) - V^\pi(s)$$
+
+### 1.3 MDP vs DL: ключевые отличия
+
+| Аспект | Supervised Learning | Reinforcement Learning |
+|--------|--------------------|-----------------------|
+| Данные | i.i.d. от фиксированного распределения | Агент сам генерирует данные |
+| Метки | Есть готовые | Только reward (часто sparse) |
+| Сложность | Стационарная | Нестационарная (политика меняется) |
+| Credit assignment | Тривиален | Какое действие привело к результату? |
+
+---
+
+## 2. Policy Gradient: REINFORCE
+
+### 2.1 Policy Gradient Theorem
+
+Прямая оптимизация политики $\pi_\theta$ по параметрам $\theta$:
+
+$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[\sum_{t=0}^T \nabla_\theta \log \pi_\theta(a_t | s_t) \cdot G_t\right]$$
+
+где $G_t = \sum_{k=t}^T \gamma^{k-t} r_k$ — return (сумма будущих наград).
+
+**Интуиция**: если траектория дала высокий return — увеличиваем вероятность выбранных действий.
+Если низкий — уменьшаем. Взвешиваем по тому, насколько хорошим оказался исход.
+
+### 2.2 REINFORCE алгоритм
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import gymnasium as gym
+import numpy as np
+
+class PolicyNet(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, act_dim),
+        )
+    def forward(self, x):
+        return F.softmax(self.net(x), dim=-1)
+
+def reinforce(env_name="CartPole-v1", n_episodes=1000, gamma=0.99, lr=1e-3):
+    env = gym.make(env_name)
+    policy = PolicyNet(env.observation_space.shape[0], env.action_space.n)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+
+    for episode in range(n_episodes):
+        obs, _ = env.reset()
+        log_probs, rewards = [], []
+
+        # Собираем эпизод
+        done = False
+        while not done:
+            obs_t = torch.FloatTensor(obs)
+            probs  = policy(obs_t)
+            dist   = torch.distributions.Categorical(probs)
+            action = dist.sample()
+            log_probs.append(dist.log_prob(action))
+
+            obs, reward, terminated, truncated, _ = env.step(action.item())
+            rewards.append(reward)
+            done = terminated or truncated
+
+        # Вычисляем returns G_t (с конца)
+        G, returns = 0, []
+        for r in reversed(rewards):
+            G = r + gamma * G
+            returns.insert(0, G)
+        returns = torch.FloatTensor(returns)
+
+        # Loss = -log π(a|s) * G
+        loss = -torch.stack(log_probs) @ returns / len(rewards)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+```
+
+### 2.3 Baseline для снижения дисперсии
+
+Проблема REINFORCE: высокая дисперсия. Любая константа $b$ не смещает градиент:
+
+$$\nabla_\theta J = \mathbb{E}\left[\nabla_\theta \log \pi_\theta(a|s) \cdot (G_t - b)\right]$$
+
+Оптимальный baseline — $V^\pi(s)$:
+
+$$\nabla_\theta J = \mathbb{E}\left[\nabla_\theta \log \pi_\theta(a|s) \cdot A^\pi(s, a)\right]$$
+
+Если мы знаем advantage, то действия, лучшие среднего, усиливаются, худшие — ослабляются.
+
+---
 
 ## 3. Actor-Critic
-Модель состоит из Actor (политика) и Critic (оценка ценности). Advantage function используется для стабильности. Метод A2C.
+
+### 3.1 Архитектура
+
+Actor-Critic = два модуля:
+
+- **Actor** $\pi_\theta(a|s)$ — политика (что делать)
+- **Critic** $V_\phi(s)$ — value function (насколько хорошо текущее состояние)
+
+**TD Error** (Temporal Difference) — однобатчевая оценка advantage:
+
+$$\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$
+
+Это смещённая но малодисперсная оценка $A^\pi(s_t, a_t)$.
+
+**GAE (Generalized Advantage Estimation)** — компромисс bias/variance через $\lambda$:
+
+$$\hat{A}_t = \sum_{k=0}^{\infty} (\gamma\lambda)^k \delta_{t+k}$$
+
+При $\lambda=0$: чистый TD (высокий bias, низкая variance). При $\lambda=1$: Monte Carlo (нет bias, высокая variance).
+
+```python
+class ActorCritic(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=256):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(obs_dim, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+        )
+        self.actor  = nn.Linear(hidden, act_dim)   # policy head
+        self.critic = nn.Linear(hidden, 1)         # value head
+
+    def forward(self, x):
+        h = self.backbone(x)
+        return self.actor(h), self.critic(h).squeeze(-1)
+
+    def get_action(self, obs):
+        logits, value = self(obs)
+        dist   = torch.distributions.Categorical(logits=logits)
+        action = dist.sample()
+        return action, dist.log_prob(action), value
+
+def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
+    advantages, gae = [], 0
+    next_value = 0
+    for r, v, d in zip(reversed(rewards), reversed(values), reversed(dones)):
+        delta = r + gamma * next_value * (1 - d) - v
+        gae   = delta + gamma * lam * (1 - d) * gae
+        advantages.insert(0, gae)
+        next_value = v
+    return torch.FloatTensor(advantages)
+```
+
+---
 
 ## 4. PPO (Proximal Policy Optimization)
-Clip objective предотвращает слишком сильное изменение политики за один шаг обновления. Importance sampling позволяет переиспользовать траектории. PPO стал индустриальным стандартом благодаря своей стабильности.
 
-## 5. RLHF (RL from Human Feedback)
-Используется для выравнивания (alignment) LLM:
-1. Обучение Reward Model на разметке людей (какой ответ лучше).
-2. PPO для дообучения LLM максимизировать Reward Model.
+### 4.1 Проблема больших обновлений
 
-## 6. Отличие RL от DL
-RL сложнее из-за нестационарности распределения (агент сам влияет на то, какие данные он видит), sparse rewards (награда может быть очень редкой) и дилеммы exploration vs exploitation.
+Policy gradient: если сделать слишком большой шаг, политика может сильно ухудшиться,
+и следующие данные будут собраны плохой политикой — нет возврата.
+
+TRPO решает это через доверительную область (trust region), но требует вычисления Fisher matrix — дорого.
+
+### 4.2 Clipped Surrogate Objective
+
+PPO (Schulman et al., 2017) — простая и эффективная апроксимация TRPO.
+
+**Важность сэмплирования** (importance sampling) позволяет переиспользовать данные со старой политики $\pi_{\theta_\text{old}}$:
+
+$$r_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_\text{old}}(a_t | s_t)}$$
+
+**PPO-Clip objective**:
+
+$$\mathcal{L}^{\text{CLIP}}(\theta) = \mathbb{E}_t\left[\min\!\left(r_t(\theta) \hat{A}_t,\; \text{clip}(r_t(\theta), 1-\varepsilon, 1+\varepsilon) \hat{A}_t\right)\right]$$
+
+**Интуиция clipping**:
+- Если $\hat{A}_t > 0$: хотим увеличить $r_t$ (чаще выбирать действие), но не более чем до $1+\varepsilon$
+- Если $\hat{A}_t < 0$: хотим уменьшить $r_t$, но не ниже $1-\varepsilon$
+
+Типично $\varepsilon = 0.2$.
+
+### 4.3 Полный PPO Loss
+
+$$\mathcal{L}(\theta) = \mathcal{L}^{\text{CLIP}}(\theta) - c_1 \mathcal{L}^{\text{VF}}(\theta) + c_2 \mathcal{H}[\pi_\theta]$$
+
+где:
+
+- $\mathcal{L}^{\text{VF}} = \mathbb{E}_t[(V_\phi(s_t) - V_t^\text{target})^2]$ — value function loss
+- $\mathcal{H}[\pi_\theta] = -\sum_a \pi_\theta(a|s) \log \pi_\theta(a|s)$ — entropy bonus (поощряем исследование)
+
+```python
+def ppo_update(actor_critic, optimizer, states, actions, old_log_probs,
+               returns, advantages, clip_eps=0.2, c1=0.5, c2=0.01, epochs=10):
+    for _ in range(epochs):
+        logits, values = actor_critic(states)
+        dist = torch.distributions.Categorical(logits=logits)
+
+        new_log_probs = dist.log_prob(actions)
+        entropy       = dist.entropy().mean()
+
+        # Importance sampling ratio
+        ratio = (new_log_probs - old_log_probs).exp()
+
+        # Clipped objective
+        surr1 = ratio * advantages
+        surr2 = ratio.clamp(1 - clip_eps, 1 + clip_eps) * advantages
+        actor_loss = -torch.min(surr1, surr2).mean()
+
+        # Value loss
+        value_loss = F.mse_loss(values, returns)
+
+        loss = actor_loss + c1 * value_loss - c2 * entropy
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(actor_critic.parameters(), 0.5)
+        optimizer.step()
+```
+
+### 4.4 PPO vs TRPO
+
+| Характеристика | TRPO | PPO |
+|---------------|------|-----|
+| Trust region | Жёсткое ограничение (KL) | Мягкое (clip) |
+| Реализация | Сложная (CG, Fisher matrix) | Простая (~100 строк) |
+| Производительность | Хорошая | Сравнима или лучше |
+| Масштабируемость | Плохо | Хорошо |
+
+PPO — **де-факто стандарт** в RL: используется в OpenAI Dota 2, ChatGPT RLHF, Google AlphaStar.
+
+---
+
+## 5. RLHF: Alignment LLM
+
+### 5.1 Полный пайплайн
+
+**Шаг 1: SFT (Supervised Fine-Tuning)**
+
+Дообучаем pretrained LLM на примерах хорошего поведения ассистента.
+
+$$\mathcal{L}_\text{SFT} = -\sum_t \log \pi_\theta(y_t | x, y_{<t})$$
+
+**Шаг 2: Reward Model (RM)**
+
+Обучаем модель оценивать качество ответа на основе человеческих предпочтений.
+
+Данные: $(x, y_w, y_l)$ — вопрос + лучший + худший ответ.
+
+$$\mathcal{L}_\text{RM} = -\mathbb{E}_{(x, y_w, y_l)}\left[\log\sigma(r_\phi(x, y_w) - r_\phi(x, y_l))\right]$$
+
+Архитектурно: LLM + linear head $\to$ scalar score.
+
+**Шаг 3: PPO с KL-штрафом**
+
+Максимизируем RM score при ограничении: не уходить далеко от SFT.
+
+$$\mathcal{L}_\text{RLHF} = \mathbb{E}_x\left[\mathbb{E}_{y \sim \pi_\theta(\cdot|x)}\left[r_\phi(x, y)\right] - \beta\,\text{KL}(\pi_\theta(\cdot|x) \| \pi_\text{SFT}(\cdot|x))\right]$$
+
+KL-штраф критичен: без него модель быстро находит "reward hacking" — формально высокие оценки при бессмысленных ответах.
+
+### 5.2 DPO (Direct Preference Optimization)
+
+Rafailov et al. (2023). Оказывается, оптимальная политика RLHF имеет аналитическое решение:
+
+$$\pi_\theta^*(y|x) \propto \pi_\text{ref}(y|x) \exp\!\left(\frac{r(x,y)}{\beta}\right)$$
+
+Подставляя это в Bradley-Terry loss, получаем **прямую** оптимизацию без RM и RL:
+
+$$\mathcal{L}_\text{DPO}(\theta) = -\mathbb{E}_{(x,y_w,y_l)}\left[\log\sigma\!\left(\beta\underbrace{\log\frac{\pi_\theta(y_w|x)}{\pi_\text{ref}(y_w|x)}}_{\text{implicit reward } y_w} - \beta\underbrace{\log\frac{\pi_\theta(y_l|x)}{\pi_\text{ref}(y_l|x)}}_{\text{implicit reward } y_l}\right)\right]$$
+
+```python
+from trl import DPOTrainer, DPOConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model     = AutoModelForCausalLM.from_pretrained("sft-checkpoint")
+ref_model = AutoModelForCausalLM.from_pretrained("sft-checkpoint")  # frozen
+tokenizer = AutoTokenizer.from_pretrained("sft-checkpoint")
+
+config = DPOConfig(beta=0.1, per_device_train_batch_size=2, num_train_epochs=3)
+trainer = DPOTrainer(
+    model=model, ref_model=ref_model, args=config,
+    train_dataset=dataset,  # {"prompt", "chosen", "rejected"}
+    tokenizer=tokenizer,
+)
+trainer.train()
+```
+
+---
+
+## 6. GRPO (Group Relative Policy Optimization)
+
+### 6.1 Идея
+
+DeepSeek-R1 (2025). В стандартном PPO/RLHF нужен отдельный Value Model (critic) — это дорого (второй LLM!). GRPO устраняет необходимость в critic.
+
+**Ключевая идея**: для каждого вопроса $q$ генерируем **группу** из $G$ ответов $\{o_i\}_{i=1}^G$ и используем их награды для вычисления baseline.
+
+### 6.2 Формула GRPO
+
+**Групповой baseline**:
+
+$$\hat{A}_i = \frac{r_i - \text{mean}(\{r_j\})}{\text{std}(\{r_j\})}$$
+
+Нормализованный advantage по группе — вместо V-функции!
+
+**GRPO objective**:
+
+$$\mathcal{J}_\text{GRPO}(\theta) = \mathbb{E}_{q, \{o_i\}}\!\left[\frac{1}{G}\sum_{i=1}^G \min\!\left(r_i^t \hat{A}_i,\; \text{clip}(r_i^t, 1-\varepsilon, 1+\varepsilon)\hat{A}_i\right) - \beta\,\text{KL}(\pi_\theta \| \pi_\text{ref})\right]$$
+
+где $r_i^t = \frac{\pi_\theta(o_i|q)}{\pi_{\theta_\text{old}}(o_i|q)}$ — importance ratio.
+
+```python
+def grpo_step(model, ref_model, prompts, reward_fn, G=8, beta=0.01, eps=0.2):
+    """Один шаг GRPO."""
+    all_rewards, all_responses = [], []
+
+    # Генерируем G ответов для каждого промпта
+    for prompt in prompts:
+        responses = [model.generate(prompt) for _ in range(G)]
+        rewards   = [reward_fn(prompt, r) for r in responses]
+        all_rewards.append(rewards)
+        all_responses.append(responses)
+
+    total_loss = 0
+    for prompt, responses, rewards in zip(prompts, all_responses, all_rewards):
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        # Групповая нормализация (без Value model!)
+        advantages = (rewards_t - rewards_t.mean()) / (rewards_t.std() + 1e-8)
+
+        for resp, adv in zip(responses, advantages):
+            log_prob     = model.log_prob(prompt, resp)
+            log_prob_ref = ref_model.log_prob(prompt, resp)
+            log_prob_old = log_prob.detach()
+
+            ratio = (log_prob - log_prob_old).exp()
+            surr1 = ratio * adv
+            surr2 = ratio.clamp(1 - eps, 1 + eps) * adv
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            kl_loss = (log_prob - log_prob_ref).mean()
+            total_loss += policy_loss + beta * kl_loss
+
+    return total_loss / (len(prompts) * G)
+```
+
+### 6.3 Reward Functions в GRPO
+
+В DeepSeek-R1 для математики и кода используются **rule-based rewards**:
+
+- **Format reward**: ответ содержит `<think>...</think>` блок → +0.1
+- **Accuracy reward**: финальный ответ совпадает с GT → +1.0 (binary)
+
+Отсутствие обученного reward model = нет reward hacking по артефактам RM.
+
+---
+
+## 7. Практика
+
+### 7.1 Gymnasium API
+
+```python
+import gymnasium as gym
+import numpy as np
+
+env = gym.make("CartPole-v1", render_mode="human")
+obs, info = env.reset(seed=42)
+
+for step in range(1000):
+    action = env.action_space.sample()      # случайная политика
+    obs, reward, terminated, truncated, info = env.step(action)
+    done = terminated or truncated
+    if done:
+        obs, info = env.reset()
+
+env.close()
+
+# Информация о пространствах
+print(env.observation_space)  # Box(4,) — 4 числа
+print(env.action_space)       # Discrete(2) — влево/вправо
+```
+
+### 7.2 Stable Baselines 3
+
+```python
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.evaluation import evaluate_policy
+
+# Параллельные среды для ускорения
+vec_env = make_vec_env("CartPole-v1", n_envs=8)
+
+model = PPO(
+    "MlpPolicy",
+    vec_env,
+    learning_rate=3e-4,
+    n_steps=2048,
+    batch_size=64,
+    n_epochs=10,
+    gamma=0.99,
+    gae_lambda=0.95,
+    clip_range=0.2,
+    ent_coef=0.0,
+    verbose=1,
+)
+model.learn(total_timesteps=500_000)
+
+# Оценка
+mean_reward, std_reward = evaluate_policy(model, vec_env, n_eval_episodes=20)
+print(f"Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+
+model.save("cartpole_ppo")
+```
+
+### 7.3 TRL: RLHF и DPO для LLM
+
+```python
+from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
+from transformers import AutoTokenizer
+
+# PPO с reward model
+config = PPOConfig(
+    model_name="gpt2",
+    learning_rate=1.41e-5,
+    log_with="wandb",
+    mini_batch_size=128,
+    batch_size=1024,
+    gradient_accumulation_steps=1,
+    early_stopping=False,
+    target_kl=6.0,
+    kl_penalty="kl",
+    seed=0,
+    use_score_scaling=True,
+    use_score_norm=True,
+    score_clip=0.5,
+)
+
+model = AutoModelForCausalLMWithValueHead.from_pretrained("gpt2-sft")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token
+
+ppo_trainer = PPOTrainer(config=config, model=model, tokenizer=tokenizer)
+
+# Training loop
+for batch in dataloader:
+    query_tensors = batch["input_ids"]
+    # Генерируем ответы
+    response_tensors = ppo_trainer.generate(
+        query_tensors, return_prompt=False, length_sampler=length_sampler
+    )
+    # Считаем reward (через reward model или rule-based)
+    rewards = [reward_model(q, r) for q, r in zip(query_tensors, response_tensors)]
+    # PPO шаг
+    stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+```
+
+---
+
+## Итоги
+
+1. **MDP**: $(S, A, P, R, \gamma)$; цель — максимизировать $J(\pi) = \mathbb{E}[\sum \gamma^t r_t]$; value functions, advantage
+2. **REINFORCE**: $\nabla J = \mathbb{E}[\nabla\log\pi \cdot G_t]$; baseline снижает дисперсию; advantage = $G_t - V(s_t)$
+3. **Actor-Critic**: Actor (policy) + Critic (value); TD-error; GAE для оценки advantage
+4. **PPO**: clipped surrogate objective; $\varepsilon = 0.2$; entropy bonus; value loss; без матрицы Fisher
+5. **RLHF**: SFT → Reward Model → PPO с KL-штрафом; DPO — упрощение без RM и RL-цикла
+6. **GRPO**: групповой baseline без Critic; rule-based rewards; DeepSeek-R1
+
+---
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар**: [advanced](../../../seminars/tracks/rl/advanced.html) — REINFORCE и A2C на CartPole.
-- **ДЗ**: [rl](../../../homework/tracks/rl/README.qmd) — RL агент на новом окружении с ablation study.
+- **Семинар** ([advanced](../../../seminars/tracks/rl/advanced.html)): REINFORCE и A2C на CartPole с нуля; сравнение baseline vs no-baseline; PPO через Stable Baselines 3.
+- **ДЗ**: [rl](../../../homework/tracks/rl/README.qmd) — обучить PPO-агента на новой среде (LunarLander, BipedalWalker) или реализовать reward modelling на preference data.
 :::

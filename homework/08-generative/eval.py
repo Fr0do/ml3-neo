@@ -1,8 +1,8 @@
 def evaluate(submission_dir, data_dir):
-    \"\"\"
-    Stub for generative homework evaluation.
+    """Stub for generative homework evaluation.
+
     This homework is purely judge-graded.
-    \"\"\"
+    """
     import json
     import os
     

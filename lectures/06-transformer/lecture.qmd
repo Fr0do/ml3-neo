@@ -1,95 +1,830 @@
 ---
-title: "Лекция 06 — Transformer deep dive"
-subtitle: "Attention, Positional Encoding, BERT vs GPT, Efficient Attention"
+title: "Лекция 06 — Transformer Deep Dive"
+subtitle: "Attention Is All You Need: от мотивации до Flash Attention"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **шестой core-модуль**. Мы переходим от последовательных RNN (модуль 05) к архитектуре Transformer, которая полностью заменила рекуррентность механизмом внимания.
+Это **шестой core-модуль**. Мы переходим от последовательных RNN (модуль 05) к архитектуре Transformer — архитектуре, которая с 2017 года полностью доминирует в NLP, а сегодня используется в компьютерном зрении, аудио, биоинформатике и мультимодальных системах. Основа лекции — оригинальная статья Vaswani et al., 2017 «Attention Is All You Need».
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/06-transformer/basic.html){.active} · [advanced](../../seminars/06-transformer/advanced.html)
 :::
 
+---
+
 ## 1. Мотивация: почему не RNN
 
-Рекуррентные нейронные сети (RNN) имеют фундаментальную проблему: последовательное вычисление $h_t = f(h_{t-1}, x_t)$. Это делает невозможным параллельное вычисление вдоль оси времени (sequence length), что сильно ограничивает использование современных GPU.
+### 1.1 Фундаментальный изъян рекуррентности
 
-Механизм **Attention** (внимание) вычисляет зависимости между точками последовательности за $O(n^2)$ операций (где $n$ — длина последовательности), но эти вычисления выполняются полностью параллельно!
+До 2017 года **RNN (LSTM, GRU)** были стандартом для задач sequence-to-sequence: машинного перевода, суммаризации, синтеза речи. Encoder-decoder с attention (Bahdanau et al., 2014) — лучшая архитектура того времени.
+
+Но у рекуррентных моделей есть фундаментальная проблема, которую не решает никакой LSTM:
+
+$$h_t = f(h_{t-1}, x_t)$$
+
+Состояние на шаге $t$ зависит от состояния на шаге $t-1$. Это означает **невозможность параллельного вычисления вдоль временной оси**. GPU умеют делать тысячи операций параллельно — но RNN вынуждает их работать последовательно.
+
+Практические следствия:
+- **Скорость обучения**: длинная последовательность $n$ = $n$ последовательных шагов, нельзя ускорить на GPU
+- **Длинные зависимости**: информация с начала последовательности должна "доползти" через все $n$ шагов — градиенты затухают или взрываются
+- **Память**: при длинных контекстах вектор $h_t$ должен кодировать всё прошлое — это информационное узкое горлышко
+
+Для RNN максимальная длина пути между двумя позициями — $O(n)$. Это значит: чем дальше зависимость, тем тяжелее её выучить.
+
+### 1.2 Путь к Transformer: attention в RNN
+
+Bahdanau et al. (2014) предложили прикрепить к decoder-encoder механизм **attention**: декодер на каждом шаге смотрит на **все** encoder-состояния, а не только на финальное. Это решило проблему информационного узкого горлышка — но рекуррентность никуда не делась, модель всё ещё последовательная.
+
+**Ключевая идея Vaswani et al. (2017)**: а что если убрать рекуррентность полностью? Построить модель *entirely on attention mechanisms*, dispensing with recurrence and convolutions entirely.
+
+Результат: Transformer обучается в 3–10 раз быстрее и показывает лучшее качество.
+
+::: {.callout-tip title="Сравнение сложностей (из таблицы 1 статьи)"}
+| Тип слоя | Сложность на слой | Последовательных операций | Макс. длина пути |
+|---|---|---|---|
+| Self-Attention | $O(n^2 \cdot d)$ | $O(1)$ | $O(1)$ |
+| Recurrent | $O(n \cdot d^2)$ | $O(n)$ | $O(n)$ |
+| Convolutional | $O(k \cdot n \cdot d^2)$ | $O(1)$ | $O(\log_k n)$ |
+
+Self-Attention соединяет любые две позиции за **константное** число операций. Цена — квадратичная зависимость от длины последовательности $n$.
+:::
+
+---
 
 ## 2. Scaled Dot-Product Attention
 
-В основе трансформера лежит операция **Scaled Dot-Product Attention**. Интуицию можно взять из информационного поиска (retrieval): у нас есть запрос (Query), и мы ищем по ключам (Keys), чтобы получить значения (Values).
+### 2.1 Интерпретация Q, K, V через поиск информации
 
-Формула внимания:
-$$
-\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
-$$
-где $Q, K, V$ — матрицы запросов, ключей и значений, а $d_k$ — размерность вектора ключа. Деление на $\sqrt{d_k}$ (scaling) предотвращает попадание softmax в области с малым градиентом при больших размерностях.
+Механизм внимания можно понять через аналогию с информационным поиском. Представьте базу данных ключ-значение (key-value store):
 
-## 3. Multi-Head Attention (MHA)
+- **Query (Q)** — запрос: «что я ищу?»
+- **Key (K)** — индекс: «что у меня есть?»
+- **Value (V)** — содержимое: «что я отдаю?»
 
-Вместо одного "внимания", трансформер использует несколько "голов" (heads). Это позволяет модели одновременно фокусироваться на разных паттернах (например, одна голова смотрит на предыдущее слово, другая — на подлежащее, третья — на знаки препинания).
+Мы вычисляем совместимость (compatibility) запроса с каждым ключом, нормируем через softmax и берём взвешенную сумму значений.
 
-Каждая голова вычисляется независимо:
-$$
-\text{head}_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)
-$$
-Затем выходы всех голов конкатенируются и умножаются на матрицу $W^O$:
-$$
-\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)W^O
-$$
+В жёстком поиске (hard retrieval) мы вернули бы точное совпадение. Attention — это **мягкий (soft) поиск**: мы берём взвешенную смесь всех значений, где веса отражают степень схожести.
 
-## 4. Positional Encoding
+### 2.2 Формула и масштабирование
 
-Поскольку attention не знает о порядке токенов, нам нужно явно передать информацию о позиции.
+Формула **Scaled Dot-Product Attention**:
 
-- **Sinusoidal PE:** Оригинальный трансформер использует синусы и косинусы разных частот. Это позволяет модели легко выучивать относительные смещения, так как $PE_{pos+k}$ является линейной функцией от $PE_{pos}$.
-- **Learned PE:** В BERT и GPT позиции просто выучиваются как обычные эмбеддинги.
-- **RoPE (Rotary Position Embedding):** Современный стандарт (LLaMA, и др.), где позиции кодируются через вращение векторов в комплексной плоскости.
+$$\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
 
-## 5. Transformer Encoder Block
+Размерности:
+- $Q \in \mathbb{R}^{n \times d_k}$ — матрица запросов ($n$ запросов, каждый $d_k$-мерный)
+- $K \in \mathbb{R}^{m \times d_k}$ — матрица ключей ($m$ пар ключ-значение)
+- $V \in \mathbb{R}^{m \times d_v}$ — матрица значений
+- Выход $\in \mathbb{R}^{n \times d_v}$
 
-Один блок энкодера состоит из MHA и Feed-Forward Network (FFN), обёрнутых в residual-связи и нормализацию (LayerNorm).
+**Почему делим на $\sqrt{d_k}$?**
 
-**Pre-LN vs Post-LN:**
-- *Post-LN* (оригинальный): $x + \text{LayerNorm}(\text{SubLayer}(x))$. Труднее обучать, нужен warmup.
-- *Pre-LN* (современный): $x + \text{SubLayer}(\text{LayerNorm}(x))$. Стабильнее, градиенты лучше проходят, можно без warmup.
+Авторы объясняют это в сноске к статье: если компоненты $q$ и $k$ — независимые случайные переменные с нулевым средним и дисперсией 1, то их скалярное произведение $q \cdot k = \sum_{i=1}^{d_k} q_i k_i$ имеет дисперсию $d_k$.
 
-## 6. BERT vs GPT
+При больших $d_k$ скалярные произведения становятся большими по абсолютной величине, softmax попадает в области с крайне малыми градиентами (один вес близок к 1, остальные к 0 — «острый» softmax). Деление на $\sqrt{d_k}$ стабилизирует масштаб.
 
-Два основных подхода к использованию трансформера:
-- **BERT (Encoder-only):** Использует двунаправленный контекст (bidirectional). Подходит для задач понимания (classification, NER). Использует специальный токен `[CLS]` для агрегации контекста.
-- **GPT (Decoder-only):** Использует каузальное маскирование (causal masking), чтобы токен не "видел" будущее. Подходит для генерации текста (autoregressive decoding).
+### 2.3 Маскирование
 
-## 7. Efficient Attention и Масштабирование
+В decoder используется **маска**: чтобы токен на позиции $i$ не «видел» токены на позициях $> i$, мы подставляем $-\infty$ в соответствующие ячейки матрицы $QK^T$ перед softmax. После softmax эти позиции получают вес 0.
 
-Сложность внимания $O(n^2)$ ограничивает длину контекста.
-- **Flash Attention:** Оптимизация на уровне GPU (tiling, recomputation), которая ускоряет attention и экономит память без аппроксимаций.
-- **Sliding Window Attention:** Каждая позиция смотрит только на фиксированное окно предыдущих токенов (используется в Longformer, Mistral).
+```python
+import torch
+import torch.nn.functional as F
+import math
 
-Почему трансформеры так хорошо масштабируются? Увеличение числа параметров и объёма данных приводит к предсказуемому падению loss (Scaling Laws). При достижении определённого масштаба появляются "эмерджентные" (emergent) способности — zero-shot обучение и in-context learning.
 
-## 8. Что делать дальше
+def scaled_dot_product_attention(
+    q: torch.Tensor,   # (batch, heads, seq_q, d_k)
+    k: torch.Tensor,   # (batch, heads, seq_k, d_k)
+    v: torch.Tensor,   # (batch, heads, seq_k, d_v)
+    mask: torch.Tensor | None = None,  # (batch, 1, seq_q, seq_k) или None
+    dropout_p: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Scaled Dot-Product Attention из статьи Vaswani et al., 2017.
+    Возвращает (output, attention_weights).
+    """
+    d_k = q.size(-1)
+
+    # QK^T / sqrt(d_k)
+    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+    # scores: (batch, heads, seq_q, seq_k)
+
+    # Применяем маску (causal или padding)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+    # Softmax по оси ключей
+    attn_weights = F.softmax(scores, dim=-1)
+
+    # Dropout на веса (опционально)
+    if dropout_p > 0.0 and torch.is_grad_enabled():
+        attn_weights = F.dropout(attn_weights, p=dropout_p)
+
+    # Взвешенная сумма значений
+    output = torch.matmul(attn_weights, v)
+    # output: (batch, heads, seq_q, d_v)
+
+    return output, attn_weights
+```
+
+---
+
+## 3. Multi-Head Attention
+
+### 3.1 Мотивация: несколько пространств представлений
+
+Одна голова внимания усредняет — она не может одновременно фокусироваться на разных типах отношений. Авторы предлагают: вместо одного attention с $d_{\text{model}}$-мерными Q, K, V — использовать $h$ голов, каждая работает в своём подпространстве.
+
+Из статьи: *"Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this."*
+
+На практике разные головы специализируются:
+- одна голова следит за синтаксическими зависимостями (субъект-глагол)
+- другая — за анафорой (местоимение → антецедент)
+- третья — за соседними токенами (локальный контекст)
+
+### 3.2 Формулы
+
+Для каждой головы $i = 1, \ldots, h$:
+
+$$\text{head}_i = \text{Attention}(QW_i^Q,\ KW_i^K,\ VW_i^V)$$
+
+где матрицы проекций:
+- $W_i^Q \in \mathbb{R}^{d_{\text{model}} \times d_k}$
+- $W_i^K \in \mathbb{R}^{d_{\text{model}} \times d_k}$
+- $W_i^V \in \mathbb{R}^{d_{\text{model}} \times d_v}$
+
+Результаты конкатенируются и проецируются:
+
+$$\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h)\,W^O$$
+
+где $W^O \in \mathbb{R}^{h d_v \times d_{\text{model}}}$.
+
+**Гиперпараметры базовой модели из статьи**: $h = 8$, $d_k = d_v = d_{\text{model}} / h = 64$. Общая стоимость вычислений сопоставима с одной головой полной размерности — при $h$ голов размерность каждой уменьшена в $h$ раз.
+
+### 3.3 Реализация
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Attention по Vaswani et al., 2017.
+    d_model: размерность модели (512 в базовой конфигурации)
+    num_heads: число голов (8 в базовой конфигурации)
+    """
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model должен делиться на num_heads"
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads  # размерность одной головы
+
+        # Линейные проекции для Q, K, V и выхода
+        self.W_q = nn.Linear(d_model, d_model, bias=False)
+        self.W_k = nn.Linear(d_model, d_model, bias=False)
+        self.W_v = nn.Linear(d_model, d_model, bias=False)
+        self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query: torch.Tensor,   # (batch, seq_q, d_model)
+        key: torch.Tensor,     # (batch, seq_k, d_model)
+        value: torch.Tensor,   # (batch, seq_k, d_model)
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size = query.size(0)
+
+        # Линейные проекции + разбиение на головы
+        # (batch, seq, d_model) -> (batch, seq, heads, d_k) -> (batch, heads, seq, d_k)
+        def project_and_split(x, W):
+            return W(x).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+
+        q = project_and_split(query, self.W_q)  # (batch, heads, seq_q, d_k)
+        k = project_and_split(key,   self.W_k)  # (batch, heads, seq_k, d_k)
+        v = project_and_split(value, self.W_v)  # (batch, heads, seq_k, d_k)
+
+        # Scaled Dot-Product Attention для всех голов параллельно
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+
+        # Взвешенная сумма: (batch, heads, seq_q, d_k)
+        context = torch.matmul(attn, v)
+
+        # Конкатенация голов: (batch, seq_q, d_model)
+        context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+
+        # Финальная проекция W^O
+        return self.W_o(context)
+```
+
+---
+
+## 4. Encoder Stack
+
+### 4.1 Структура одного блока
+
+Энкодер состоит из $N = 6$ идентичных слоёв. Каждый слой содержит два подслоя:
+
+1. **Multi-Head Self-Attention** — каждая позиция может «смотреть» на все позиции входной последовательности
+2. **Position-wise Feed-Forward Network (FFN)** — независимо применяется к каждой позиции
+
+Оба подслоя обёрнуты в **residual connection** и **Layer Normalization**.
+
+### 4.2 Post-LN (оригинальная схема)
+
+В оригинальном Transformer нормализация идёт *после* подслоя:
+
+$$x_{\text{out}} = \text{LayerNorm}(x + \text{SubLayer}(x))$$
+
+Это **Post-LN** (Post-Layer Normalization). Авторы использовали именно её.
+
+### 4.3 Pre-LN (современный стандарт)
+
+Практика показала, что Post-LN тяжело обучать без тщательного warmup расписания — градиенты в начале обучения нестабильны. В современных моделях используется **Pre-LN**:
+
+$$x_{\text{out}} = x + \text{SubLayer}(\text{LayerNorm}(x))$$
+
+Нормализация применяется *до* подслоя. Это обеспечивает:
+- Более стабильные градиенты (LayerNorm ограничивает масштаб активаций на входе в подслой)
+- Возможность обучения без warmup
+- Лучшую сходимость при очень глубоких сетях
+
+::: {.callout-important title="Pre-LN vs Post-LN"}
+Большинство современных LLM (GPT-2, GPT-3, LLaMA, Mistral) используют Pre-LN. Если вы обучаете трансформер с нуля — используйте Pre-LN.
+:::
+
+```python
+class EncoderBlock(nn.Module):
+    """Один блок Transformer Encoder с Pre-LN."""
+
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ffn = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        # Pre-LN Self-Attention
+        x = x + self.dropout(self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x), mask))
+        # Pre-LN FFN
+        x = x + self.dropout(self.ffn(self.norm2(x)))
+        return x
+```
+
+---
+
+## 5. Decoder Stack: Masked Self-Attention и Cross-Attention
+
+### 5.1 Три типа attention в Transformer
+
+Оригинальный Transformer (encoder-decoder для seq2seq) использует attention трёх видов:
+
+1. **Encoder self-attention**: каждая позиция входа смотрит на все другие позиции входа. Q, K, V — из одного источника (выхода предыдущего слоя). Bidirectional — нет маскирования.
+
+2. **Decoder masked self-attention**: каждая позиция выхода смотрит на предыдущие позиции выхода. Применяется **causal mask** (треугольная нижняя маска) — позиция $i$ не должна видеть позиции $j > i$.
+
+3. **Decoder cross-attention** (encoder-decoder attention): запросы приходят из предыдущего decoder-слоя, ключи и значения — из выхода энкодера. Это основной механизм передачи информации от входа к выходу.
+
+### 5.2 Causal Masking
+
+Авторы реализуют маскирование через подстановку $-\infty$ перед softmax:
+
+```python
+def make_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
+    """
+    Создаёт causal (lower-triangular) маску для decoder self-attention.
+    mask[i, j] = 1, если позиция i может видеть позицию j (j <= i).
+    """
+    # Нижнетреугольная матрица из единиц
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
+    # Добавляем batch и head измерения: (1, 1, seq, seq)
+    return mask.unsqueeze(0).unsqueeze(0)
+
+
+class DecoderBlock(nn.Module):
+    """Один блок Transformer Decoder с Pre-LN."""
+
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.masked_self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ffn = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,              # (batch, seq_tgt, d_model)
+        enc_output: torch.Tensor,     # (batch, seq_src, d_model)
+        tgt_mask: torch.Tensor | None = None,  # causal mask
+        src_mask: torch.Tensor | None = None,  # padding mask
+    ) -> torch.Tensor:
+        # 1. Masked Self-Attention (causal)
+        x_norm = self.norm1(x)
+        x = x + self.dropout(self.masked_self_attn(x_norm, x_norm, x_norm, tgt_mask))
+
+        # 2. Cross-Attention: Q из decoder, K и V из encoder
+        x_norm = self.norm2(x)
+        x = x + self.dropout(self.cross_attn(x_norm, enc_output, enc_output, src_mask))
+
+        # 3. FFN
+        x = x + self.dropout(self.ffn(self.norm3(x)))
+        return x
+```
+
+### 5.3 Decoder-only модели (GPT-стиль)
+
+В decoder-only моделях (GPT, LLaMA) нет энкодера и cross-attention. Есть только masked self-attention — модель предсказывает следующий токен по предыдущим. Это чистое авторегрессионное языковое моделирование.
+
+---
+
+## 6. Positional Encoding
+
+### 6.1 Проблема: attention не знает о порядке
+
+Attention — это операция над **множеством**, а не **последовательностью**. Если переставить токены местами, веса attention изменятся, но сам механизм не «знает» о расстоянии между позициями. Нужно явно внедрить информацию о порядке.
+
+### 6.2 Sinusoidal PE (оригинальный Transformer)
+
+Авторы предложили добавлять к эмбеддингам детерминированные позиционные кодировки:
+
+$$PE_{(pos, 2i)} = \sin\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+
+$$PE_{(pos, 2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+
+Здесь $pos$ — позиция токена, $i$ — индекс измерения (от 0 до $d_{\text{model}}/2 - 1$).
+
+Каждое измерение PE соответствует синусоиде. Длины волн образуют геометрическую прогрессию от $2\pi$ до $10000 \cdot 2\pi$. Низкочастотные измерения кодируют глобальную позицию, высокочастотные — локальную.
+
+**Ключевое свойство**: $PE_{pos+k}$ является линейной функцией от $PE_{pos}$ — это позволяет модели легко выучивать относительные смещения.
+
+```python
+import torch
+import math
+
+
+def sinusoidal_positional_encoding(max_len: int, d_model: int) -> torch.Tensor:
+    """
+    Sinusoidal Positional Encoding по формуле из статьи.
+    Возвращает тензор (max_len, d_model).
+    """
+    pe = torch.zeros(max_len, d_model)
+    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # (max_len, 1)
+
+    # Знаменатель: 10000^(2i/d_model)
+    div_term = torch.exp(
+        torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
+    )
+
+    pe[:, 0::2] = torch.sin(position * div_term)  # чётные измерения
+    pe[:, 1::2] = torch.cos(position * div_term)  # нечётные измерения
+
+    return pe  # (max_len, d_model)
+```
+
+Авторы также экспериментировали с learned PE — результаты оказались практически идентичными. Sinusoidal был выбран из-за способности **экстраполировать** на длины последовательностей, не встречавшиеся при обучении.
+
+### 6.3 Learned PE (BERT, GPT-2)
+
+Простой подход: позиционные эмбеддинги — обычные обучаемые параметры `nn.Embedding(max_len, d_model)`. Работает хорошо в пределах обученной длины, но не экстраполирует.
+
+### 6.4 RoPE — Rotary Position Embedding
+
+**RoPE** (Su et al., 2021) — современный стандарт в LLM (LLaMA, Mistral, GPT-NeoX). Идея: вместо добавления позиционного вектора к эмбеддингу применяем поворот вектора Q и K в комплексной плоскости. Угол поворота зависит от позиции.
+
+Ключевые свойства RoPE:
+- Скалярное произведение $q_m \cdot k_n$ зависит только от **относительного** смещения $m - n$
+- Хорошо работает при длинных контекстах (в т.ч. с расширением контекста через NTK/YaRN)
+- Не требует хранения отдельной таблицы PE
+
+### 6.5 ALiBi — Attention with Linear Biases
+
+**ALiBi** (Press et al., 2021) не добавляет позиционных эмбеддингов вообще. Вместо этого к матрице $QK^T$ добавляется штраф, пропорциональный расстоянию между позициями:
+
+$$\text{score}(i, j) = q_i \cdot k_j - m \cdot |i - j|$$
+
+Разные головы используют разные коэффициенты $m$. ALiBi хорошо экстраполирует на длинные контексты без дообучения.
+
+---
+
+## 7. FFN Sublayer
+
+### 7.1 Оригинальная FFN
+
+В каждом блоке после attention стоит **Position-wise Feed-Forward Network**. «Position-wise» означает, что одна и та же FFN применяется к каждой позиции независимо (как свёртка $1 \times 1$):
+
+$$\text{FFN}(x) = \max(0,\, xW_1 + b_1)\,W_2 + b_2$$
+
+Размерности из статьи:
+- Вход/выход: $d_{\text{model}} = 512$
+- Скрытый слой: $d_{ff} = 2048$ (в 4 раза больше!)
+
+Таким образом, FFN — это двухслойная MLP с ReLU, где средний слой в 4 раза шире.
+
+```python
+class FeedForward(nn.Module):
+    """
+    Position-wise FFN: два линейных слоя с активацией.
+    Оригинал: ReLU. Современный вариант: SwiGLU.
+    """
+
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1, activation: str = 'relu'):
+        super().__init__()
+        self.W1 = nn.Linear(d_model, d_ff)
+        self.W2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        if activation == 'relu':
+            self.act = nn.ReLU()
+        elif activation == 'gelu':
+            self.act = nn.GELU()
+        else:
+            raise ValueError(f"Неизвестная активация: {activation}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.W2(self.dropout(self.act(self.W1(x))))
+```
+
+### 7.2 SwiGLU и GLU-варианты
+
+Современные LLM (LLaMA, PaLM, Mistral) используют **SwiGLU** вместо ReLU. GLU (Gated Linear Unit) — это механизм ворот:
+
+$$\text{GLU}(x, W, V, b, c) = \sigma(xW + b) \odot (xV + c)$$
+
+**SwiGLU** заменяет sigmoid на SiLU ($x \cdot \sigma(x)$, или Swish):
+
+$$\text{SwiGLU}(x) = \text{SiLU}(xW_1) \odot (xW_3)$$
+
+$$\text{FFN}_{\text{SwiGLU}}(x) = \text{SwiGLU}(x)\,W_2$$
+
+```python
+class SwiGLUFeedForward(nn.Module):
+    """
+    FFN с SwiGLU активацией (LLaMA, Mistral, PaLM).
+    При d_ff = 4/3 * 4 * d_model примерно сохраняется число параметров.
+    """
+
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+        super().__init__()
+        # Два параллельных линейных слоя для gate и content
+        self.W_gate = nn.Linear(d_model, d_ff, bias=False)
+        self.W_up   = nn.Linear(d_model, d_ff, bias=False)
+        self.W_down  = nn.Linear(d_ff, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        self.silu = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.silu(self.W_gate(x))   # SiLU(xW_gate)
+        up   = self.W_up(x)                # xW_up
+        return self.W_down(self.dropout(gate * up))
+```
+
+::: {.callout-note title="Почему FFN так важна?"}
+FFN содержит **большую часть параметров** модели (обычно 2/3 от всех весов). Считается, что FFN слои хранят «фактуальные знания» — ключ-значение пары, выученные из данных. Mechanistic interpretability показывает, что нейроны FFN активируются на конкретных концептах.
+:::
+
+---
+
+## 8. KV-Cache: ускорение авторегрессионного инференса
+
+### 8.1 Проблема авторегрессии
+
+При генерации текста (decoder-only GPT или encoder-decoder) каждый новый токен $t$ требует вычисления attention над всей историей $[x_1, \ldots, x_{t-1}, x_t]$. Наивно это означает пересчёт K и V для всех предыдущих токенов на каждом шаге — $O(T^2)$ операций на $T$ токенов.
+
+### 8.2 Идея KV-Cache
+
+В causal (декодерном) attention K и V для токена на позиции $j$ не меняются при генерации последующих токенов. Поэтому их можно **кэшировать**: один раз вычислить и сохранить.
+
+При генерации токена $t$:
+1. Вычисляем $Q_t$, $K_t$, $V_t$ только для нового токена
+2. Конкатенируем $K_t$ к кэшу $[K_1, \ldots, K_{t-1}]$ — и аналогично для $V_t$
+3. Вычисляем attention нового запроса $Q_t$ против полного кэша K/V
+
+Вычислительная сложность: $O(T)$ вместо $O(T^2)$ на весь процесс генерации.
+
+```python
+class KVCache:
+    """Простой KV-кэш для авторегрессионного инференса."""
+
+    def __init__(self, num_layers: int, num_heads: int, d_k: int, device: torch.device):
+        self.num_layers = num_layers
+        self.cache: list[dict] = [{"k": None, "v": None} for _ in range(num_layers)]
+
+    def update(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor):
+        """Добавляем K, V нового токена к кэшу слоя layer_idx."""
+        if self.cache[layer_idx]["k"] is None:
+            self.cache[layer_idx]["k"] = k
+            self.cache[layer_idx]["v"] = v
+        else:
+            self.cache[layer_idx]["k"] = torch.cat([self.cache[layer_idx]["k"], k], dim=2)
+            self.cache[layer_idx]["v"] = torch.cat([self.cache[layer_idx]["v"], v], dim=2)
+
+    def get(self, layer_idx: int):
+        return self.cache[layer_idx]["k"], self.cache[layer_idx]["v"]
+
+    def clear(self):
+        self.cache = [{"k": None, "v": None} for _ in range(self.num_layers)]
+```
+
+**Ограничение KV-кэша**: он хранит $2 \times L \times h \times T \times d_k$ значений (2 — K и V, $L$ — число слоёв). Для длинного контекста это может занимать гигабайты GPU памяти. Отсюда методы **Multi-Query Attention** (MQA) и **Grouped-Query Attention** (GQA) — меньше голов у K и V, чем у Q.
+
+---
+
+## 9. Flash Attention
+
+### 9.1 Проблема: bandwidth, а не FLOP
+
+Стандартный attention медленен не потому, что требует много вычислений — а потому, что требует много **пересылок данных** между HBM (High Bandwidth Memory, основная память GPU) и SRAM (быстрый кэш внутри GPU).
+
+Стандартный алгоритм:
+1. Загрузить $Q, K$ из HBM → вычислить $S = QK^T / \sqrt{d_k}$ → записать в HBM
+2. Загрузить $S$ → вычислить softmax → записать $P$ в HBM
+3. Загрузить $P, V$ → вычислить $PV$ → записать выход в HBM
+
+Матрица $S$ размером $n \times n$ при длинных последовательностях огромна. Запись/чтение её из HBM — главный bottleneck.
+
+### 9.2 Идея Flash Attention (Dao et al., 2022)
+
+**Flash Attention** переупорядочивает вычисления так, чтобы минимизировать обращения к HBM:
+
+- **Tiling (разбиение на блоки)**: Q, K, V разбиваются на блоки, которые помещаются в SRAM. Attention вычисляется поблочно — матрица $n \times n$ никогда целиком не записывается в HBM.
+- **Online softmax**: используется алгоритм вычисления softmax с плавающим максимумом, позволяющий обновлять результат по мере обработки блоков без хранения полной матрицы весов.
+- **Recomputation на backward**: вместо хранения $n \times n$ матрицы весов для обратного прохода — пересчитываем их из сохранённых Q, K, V.
+
+Результат: Flash Attention **IO-сложность** — $O(n^2 d / M)$ вместо $O(n^2)$ обращений к HBM (где $M$ — размер SRAM). На практике — ускорение в 2–4 раза, снижение памяти с $O(n^2)$ до $O(n)$.
+
+::: {.callout-tip title="Flash Attention в PyTorch"}
+С PyTorch 2.0+ Flash Attention встроен в `F.scaled_dot_product_attention`. Активируется автоматически при поддержке оборудования:
+
+```python
+import torch.nn.functional as F
+
+# Автоматически выбирает Flash Attention если доступен
+output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+```
+
+Для явного управления — библиотека `flash-attn` от Tri Dao.
+:::
+
+### 9.3 Flash Attention 2 и 3
+
+**Flash Attention 2** (2023) улучшила параллелизм внутри блоков и уменьшила число non-matmul операций (они медленнее матричных умножений на Tensor Cores).
+
+**Flash Attention 3** (2024) добавила поддержку H100 с FP8 и асинхронными Tensor Cores.
+
+---
+
+## 10. Современные вариации Transformer
+
+### 10.1 Encoder-only: BERT
+
+**BERT** (Devlin et al., 2018) — только стопка энкодеров. Все токены видят всех соседей (bidirectional attention, без каузальной маски). Предобучение: Masked Language Modeling (MLM) + Next Sentence Prediction.
+
+Использование:
+- Классификация текстов (через `[CLS]` токен)
+- NER, POS-tagging (через токен-уровень)
+- Вопрос-ответ (SQuAD)
+- Sentence embeddings
+
+**Ключевые отличия от оригинального Transformer**:
+- Нет decoder и cross-attention
+- Learned PE вместо sinusoidal
+- Специальные токены `[CLS]` и `[SEP]`
+
+### 10.2 Decoder-only: GPT
+
+**GPT** (Radford et al., 2018) — только стопка декодеров без cross-attention. Каузальная маска = только авторегрессивное языковое моделирование.
+
+GPT-2, GPT-3, GPT-4, LLaMA, Mistral, Qwen — всё это decoder-only трансформеры. Отличия между ними: масштаб, RoPE вместо learned PE, GQA вместо MHA, SwiGLU вместо ReLU, RMSNorm вместо LayerNorm, отсутствие bias в линейных слоях.
+
+### 10.3 Encoder-Decoder: T5
+
+**T5** (Raffel et al., 2019) — полный encoder-decoder Transformer. Все задачи NLP формулируются как «text-to-text»: на вход — текст с префиксом задачи, на выход — текст ответа. Relative position biases вместо абсолютных PE.
+
+Современные seq2seq модели: T5, BART, mBART, NLLB — используют encoder-decoder.
+
+### 10.4 Vision Transformer (ViT)
+
+**ViT** (Dosovitskiy et al., 2020) применяет encoder-only Transformer к изображениям. Изображение разрезается на патчи $16 \times 16$ или $32 \times 32$, каждый патч — «токен». Prepend `[CLS]` токен, выход которого используется для классификации.
+
+| Архитектура | Encoder | Decoder | Attention тип | Типичное применение |
+|---|---|---|---|---|
+| Оригинальный Transformer | ✓ (6 слоёв) | ✓ (6 слоёв) | Bidirec. + Causal + Cross | Machine Translation |
+| BERT | ✓ | — | Bidirectional | Понимание текста |
+| GPT | — | ✓ | Causal | Генерация текста |
+| T5 | ✓ | ✓ | Bidirec. + Causal + Cross | Text-to-text |
+| ViT | ✓ | — | Bidirectional (патчи) | Image Classification |
+
+---
+
+## 11. Базовые гиперпараметры и конфигурации
+
+Из таблицы 3 оригинальной статьи — параметры базовой и большой моделей:
+
+| Параметр | Base | Big |
+|---|---|---|
+| Число слоёв $N$ | 6 | 6 |
+| $d_{\text{model}}$ | 512 | 1024 |
+| $d_{ff}$ | 2048 | 4096 |
+| Число голов $h$ | 8 | 16 |
+| $d_k = d_v$ | 64 | 64 |
+| Dropout | 0.1 | 0.3 |
+| Шаги обучения | 100K | 300K |
+| BLEU (EN-DE) | 27.3 | 28.4 |
+| Параметров | 65M | 213M |
+
+Обучение на 8 GPU P100: base model — 12 часов, big model — 3.5 дня. Это был прорыв по стоимости обучения относительно качества.
+
+**Learning rate schedule** (из статьи):
+
+$$lr = d_{\text{model}}^{-0.5} \cdot \min\bigl(\text{step}^{-0.5},\; \text{step} \cdot \text{warmup\_steps}^{-1.5}\bigr)$$
+
+Линейный рост $\to$ убывание как $1/\sqrt{\text{step}}$. `warmup_steps = 4000`.
+
+```python
+def transformer_lr_schedule(d_model: int, warmup_steps: int = 4000):
+    """Learning rate schedule из оригинальной статьи."""
+    def lr_lambda(step: int) -> float:
+        if step == 0:
+            step = 1
+        return d_model ** (-0.5) * min(step ** (-0.5), step * warmup_steps ** (-1.5))
+    return lr_lambda
+
+# Использование:
+optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer,
+    lr_lambda=transformer_lr_schedule(d_model=512, warmup_steps=4000)
+)
+```
+
+---
+
+## 12. Полная сборка: минимальный GPT
+
+```python
+import torch
+import torch.nn as nn
+
+
+class TransformerDecoder(nn.Module):
+    """
+    Минимальная реализация decoder-only Transformer (GPT-стиль).
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 6,
+        d_ff: int = 2048,
+        max_len: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.d_model = d_model
+
+        # Эмбеддинги токенов и позиций
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        # Стопка декодерных блоков (без cross-attention)
+        self.layers = nn.ModuleList([
+            EncoderBlock(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_model)
+
+        # Проекция на словарь (weight tying с token_emb — опционально)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                nn.init.normal_(module.weight, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        tokens: (batch, seq)
+        Возвращает логиты: (batch, seq, vocab_size)
+        """
+        batch, seq = tokens.shape
+        device = tokens.device
+
+        # Позиции
+        positions = torch.arange(seq, device=device).unsqueeze(0)  # (1, seq)
+
+        # Эмбеддинги
+        x = self.dropout(self.token_emb(tokens) + self.pos_emb(positions))
+
+        # Causal mask: (1, 1, seq, seq)
+        mask = make_causal_mask(seq, device)
+
+        # Прогон через слои
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        x = self.norm(x)
+        return self.lm_head(x)  # (batch, seq, vocab_size)
+
+
+# Быстрая проверка:
+if __name__ == "__main__":
+    model = TransformerDecoder(vocab_size=50257, d_model=512, num_heads=8, num_layers=6)
+    tokens = torch.randint(0, 50257, (2, 128))  # batch=2, seq=128
+    logits = model(tokens)
+    print(f"Выход: {logits.shape}")          # (2, 128, 50257)
+    print(f"Параметры: {sum(p.numel() for p in model.parameters()):,}")
+```
+
+---
+
+## 13. Что осталось за кадром
+
+Эта лекция сосредоточена на архитектурных основах. Важные темы следующих модулей:
+
+- **Предобучение и fine-tuning**: как обучить трансформер на большом корпусе, RLHF, instruction tuning
+- **Эффективное обучение**: gradient checkpointing, mixed precision (BF16/FP8), model parallelism
+- **Scaling Laws**: Chinchilla optimal compute, зависимость loss от параметров и данных
+- **Long Context**: Rope scaling, YaRN, Sliding Window Attention (Mistral)
+- **Quantization**: INT8/INT4 для инференса, GPTQ, AWQ
+
+---
+
+## 14. Итоги
+
+::: {.callout-important title="Минимум на запоминание"}
+1. **Attention параллелен, в отличие от RNN**: все позиции обрабатываются одновременно, максимальная длина пути между любыми двумя позициями — $O(1)$.
+
+2. **Q/K/V — soft retrieval**: Q — «что я ищу», K — «что у меня есть», V — «что я отдаю». Масштабируем на $\sqrt{d_k}$ чтобы не ломать градиенты softmax.
+
+3. **Multi-head — разные подпространства**: каждая голова специализируется на своём типе зависимостей. Параметров не больше, чем у одной широкой головы.
+
+4. **Pre-LN стабильнее Post-LN** для глубоких трансформеров — используйте Pre-LN при обучении с нуля.
+
+5. **KV-cache делает авторегрессию O(T)**: сохраняем K и V вычисленные ранее, новый токен считает attention только против кэша.
+
+6. **Flash Attention устраняет memory bottleneck**: тайлинг + online softmax позволяют не материализовывать $n \times n$ матрицу весов. В PyTorch 2.0+ доступен из коробки.
+
+7. **Три семейства**: BERT (encoder, bidirectional, понимание), GPT (decoder, causal, генерация), T5 (encoder-decoder, seq2seq). ViT — тот же BERT, но для патчей изображений.
+:::
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/06-transformer/basic.html) / [advanced](../../seminars/06-transformer/advanced.html)): реализация Attention с нуля, визуализация; мини-GPT на открытом корпусе.
+- **Семинар** ([basic](../../seminars/06-transformer/basic.html) / [advanced](../../seminars/06-transformer/advanced.html)): реализация Attention с нуля, визуализация карт внимания; мини-GPT на открытом корпусе.
 - **ДЗ**: [06-transformer](../../homework/06-transformer/README.qmd) — реализация Transformer Encoder с нуля и классификация текстов.
 :::
 
-::: {.callout-important title="Минимум на запоминание"}
-1. Attention параллелен, в отличие от RNN, но требует $O(n^2)$ памяти.
-2. Q/K/V — это retrieval: "что я ищу" (Q), "что у меня есть" (K), "что я отдаю" (V).
-3. Pre-LN стабильнее для обучения глубоких трансформеров, чем Post-LN.
-:::
+---
 
 ## Литература {.appendix}
+
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & Polosukhin, I. (2017). **Attention Is All You Need**. *Advances in Neural Information Processing Systems*, 30. arXiv:1706.03762
+
+Bahdanau, D., Cho, K., & Bengio, Y. (2014). Neural Machine Translation by Jointly Learning to Align and Translate. arXiv:1409.0473
+
+Devlin, J., Chang, M.-W., Lee, K., & Toutanova, K. (2018). BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. arXiv:1810.04805
+
+Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). **FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness**. arXiv:2205.14135
+
+Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021). RoFormer: Enhanced Transformer with Rotary Position Embedding. arXiv:2104.09864
+
+Press, O., Smith, N. A., & Lewis, M. (2021). Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation (ALiBi). arXiv:2108.12409
+
+Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv:2002.05202
+
+Dosovitskiy, A., et al. (2020). An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale (ViT). arXiv:2010.11929
 
 ::: {#refs}
 :::

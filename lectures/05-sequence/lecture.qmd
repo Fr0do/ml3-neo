@@ -1,6 +1,6 @@
 ---
-title: "Лекция 05 — Sequence models"
-subtitle: "RNN, LSTM, GRU и введение в Attention"
+title: "Лекция 05 — Sequence Models"
+subtitle: "От RNN до Attention: память, вентили и выравнивание"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
@@ -14,69 +14,628 @@ format:
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **пятый core-модуль**. Мы переходим от фиксированных тензоров (как в CNN) к данным переменной длины.
+Это **пятый core-модуль**. Позади — CNN и работа с фиксированными тензорами. Теперь переходим к данным переменной длины: текстам, временным рядам, аудио. Этот модуль — фундамент для лекции 06 (Transformer).
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/05-sequence/basic.html){.active} · [advanced](../../seminars/05-sequence/advanced.html)
 :::
 
-## 1. Зачем нужны sequence models
+---
 
-Многие типы данных имеют естественный порядок и переменную длину: тексты (NLP), временные ряды (timeseries), аудио, ДНК. Стандартная полносвязная или свёрточная сеть требует фиксированного размера входа. Рекуррентные нейронные сети (RNN) решают эту проблему, обрабатывая последовательность шаг за шагом и обновляя внутреннее состояние ("память").
+## 1. Проблема последовательностей
 
-## 2. RNN и проблема градиентов
+### Что не так с MLP и CNN?
 
-Базовая ячейка RNN обновляет скрытое состояние $h_t$ на основе предыдущего состояния $h_{t-1}$ и текущего входа $x_t$:
+Рассмотрим задачу машинного перевода. Входная фраза «кот сидит на мате» — 5 слов, а «the cat is sitting on the mat» — 7 слов. Полносвязная сеть требует фиксированного размера входа, так что прямое применение невозможно. CNN с фиксированными ядрами улавливают локальные паттерны, но плохо захватывают дальние зависимости.
+
+Ключевые свойства, которые нужны для работы с последовательностями:
+
+| Требование | MLP | CNN | RNN |
+|---|---|---|---|
+| Переменная длина входа | ✗ | частично | ✓ |
+| Разделение весов по времени | ✗ | локально | ✓ |
+| Захват дальних зависимостей | ✗ | ✗ | теоретически ✓ |
+| Порядок важен | ✗ | частично | ✓ |
+
+### Типы задач с последовательностями
+
+- **Many-to-one**: классификация тональности текста, распознавание активности
+- **One-to-many**: image captioning (один вектор → последовательность слов)
+- **Many-to-many (same length)**: NER, POS-tagging (тег на каждый токен)
+- **Many-to-many (different length)**: машинный перевод (seq2seq)
+
+---
+
+## 2. Vanilla RNN
+
+### Формула и интуиция
+
+Рекуррентная нейронная сеть обрабатывает последовательность $x_1, x_2, \ldots, x_T$ шаг за шагом, поддерживая скрытое состояние $h_t$ — «память» о том, что было до момента $t$:
 
 $$
-h_t = \tanh(W_{hh} h_{t-1} + W_{xh} x_t + b_h)
+h_t = \tanh(W_h h_{t-1} + W_x x_t + b)
 $$
 
-При разворачивании во времени (unrolled graph) RNN превращается в глубокую сеть. Обучение происходит через Backpropagation Through Time (BPTT). 
-Однако из-за многократного умножения на одну и ту же матрицу весов $W_{hh}$, градиенты при обратном проходе экспоненциально затухают (vanishing) или взрываются (exploding). Чем длиннее последовательность, тем сложнее сети "вспомнить" ранние входы.
+$$
+\hat{y}_t = W_y h_t + b_y
+$$
 
-## 3. LSTM и GRU: спасение памяти
+Здесь $W_h \in \mathbb{R}^{d_h \times d_h}$, $W_x \in \mathbb{R}^{d_h \times d_x}$ — **разделяемые** веса (одни и те же на всех шагах). Это даёт инвариантность к положению в последовательности.
 
-**LSTM (Long Short-Term Memory)** вводит понятие состояния ячейки (cell state, $c_t$) и систему вентилей (gates), которые контролируют поток информации:
-- **Forget gate**: что забыть из прошлого состояния.
-- **Input gate**: что добавить из нового входа.
-- **Output gate**: что выдать в качестве нового скрытого состояния $h_t$.
+Если развернуть граф во времени (unrolled computation graph), RNN превращается в очень глубокую сеть с разделёнными весами:
 
-Состояние ячейки $c_t$ образует "скоростную магистраль" (gradient highway), позволяя градиентам течь сквозь время без затухания.
+```
+x₁ → [RNN] → h₁ → [RNN] → h₂ → [RNN] → h₃ → ŷ
+              ↑              ↑
+             h₀             h₁
+```
 
-**GRU (Gated Recurrent Unit)** — упрощённая версия LSTM. В ней нет отдельного cell state, только скрытое состояние $h_t$, и используются только два вентиля: **reset gate** и **update gate**. GRU часто работает так же хорошо, как LSTM, но обучается быстрее.
+### Backpropagation Through Time (BPTT)
 
-## 4. Bidirectional RNN
+При обучении градиент от функции потерь $\mathcal{L}$ нужно протолкнуть назад по всей развёрнутой цепочке. По правилу цепочки:
 
-Обычная RNN читает последовательность слева направо. Во многих задачах (например, машинный перевод) полезно знать контекст как из прошлого, так и из будущего. Бинаправленные (Bidirectional) RNN состоят из двух независимых RNN: одна читает вперёд, другая — назад. Их выходы конкатенируются.
+$$
+\frac{\partial \mathcal{L}}{\partial h_1} = \frac{\partial \mathcal{L}}{\partial h_T} \cdot \prod_{t=2}^{T} \frac{\partial h_t}{\partial h_{t-1}}
+$$
 
-## 5. Attention: предшественник Трансформеров
+Каждый множитель: $\frac{\partial h_t}{\partial h_{t-1}} = \text{diag}(\tanh'(\cdot)) \cdot W_h$
 
-Даже LSTM и GRU трудно сжать длинную последовательность в один вектор фиксированного размера. Механизм **Attention** (например, Bahdanau attention) позволяет модели на каждом шаге декодирования "смотреть" на все состояния энкодера и взвешивать их важность для текущего шага.
+### Проблема взрывающихся и затухающих градиентов
 
-Визуализация **alignment matrix** (матрицы внимания) показывает, на какие слова исходного текста смотрела модель при генерации каждого нового слова.
+При $T$ шагах мы умножаем матрицу $W_h$ на себя $T$ раз. Пусть $\lambda$ — наибольшее собственное значение $W_h$:
 
-::: {.callout-tip title="Что выбрать?"}
-- **Базовая RNN**: Почти никогда не используется на практике (только в учебных целях).
-- **GRU**: Хороший дефолт, быстро работает.
-- **LSTM**: Более мощная модель, стоит пробовать, если GRU не справляется.
-- **Attention + RNN**: Стандарт для seq2seq до появления Transformer.
+- Если $|\lambda| > 1$: $\|W_h^T\| \sim \lambda^T \to \infty$ — **взрыв градиентов**
+- Если $|\lambda| < 1$: $\|W_h^T\| \sim \lambda^T \to 0$ — **затухание градиентов**
+
+::: {.callout-warning title="Практическое следствие"}
+Vanilla RNN практически неспособна учить зависимости длиннее 10–20 шагов. Для взрывающихся градиентов есть простое решение — **gradient clipping**: если $\|\nabla\| > \text{threshold}$, масштабируем градиент. Но затухание таким способом не победить.
 :::
 
-## 6. Что делать дальше
+```python
+import torch
+import torch.nn as nn
+
+# Gradient clipping в PyTorch
+optimizer.zero_grad()
+loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+optimizer.step()
+```
+
+### Vanilla RNN в PyTorch
+
+```python
+import torch
+import torch.nn as nn
+
+# nn.RNN: batch_first=True → (batch, seq_len, input_size)
+rnn = nn.RNN(
+    input_size=64,
+    hidden_size=128,
+    num_layers=1,
+    batch_first=True,
+    nonlinearity='tanh'  # или 'relu'
+)
+
+x = torch.randn(32, 20, 64)   # (batch=32, seq=20, features=64)
+h0 = torch.zeros(1, 32, 128)  # (num_layers, batch, hidden)
+
+output, hn = rnn(x, h0)
+# output: (32, 20, 128) — все скрытые состояния
+# hn:     (1, 32, 128)  — последнее скрытое состояние
+```
+
+---
+
+## 3. LSTM: Long Short-Term Memory
+
+LSTM (Hochreiter & Schmidhuber, 1997) вводит два принципиальных изменения:
+
+1. **Cell state** $c_t$ — «конвейер» информации через время (gradient highway)
+2. **Gates** — механизм контроля потока информации
+
+### Формулы четырёх вентилей
+
+$$
+f_t = \sigma(W_f [h_{t-1}, x_t] + b_f) \quad \text{(forget gate)}
+$$
+$$
+i_t = \sigma(W_i [h_{t-1}, x_t] + b_i) \quad \text{(input gate)}
+$$
+$$
+\tilde{c}_t = \tanh(W_c [h_{t-1}, x_t] + b_c) \quad \text{(candidate cell)}
+$$
+$$
+o_t = \sigma(W_o [h_{t-1}, x_t] + b_o) \quad \text{(output gate)}
+$$
+
+### Обновление состояний
+
+$$
+c_t = f_t \odot c_{t-1} + i_t \odot \tilde{c}_t
+$$
+$$
+h_t = o_t \odot \tanh(c_t)
+$$
+
+Здесь $\odot$ — поэлементное умножение (Hadamard product), $\sigma$ — сигмоид.
+
+### Интуиция вентилей
+
+| Вентиль | Диапазон | Роль |
+|---|---|---|
+| $f_t$ (forget) | [0, 1] | Сколько старого $c_{t-1}$ оставить |
+| $i_t$ (input) | [0, 1] | Насколько важен новый кандидат $\tilde{c}_t$ |
+| $o_t$ (output) | [0, 1] | Что из $c_t$ выдать наружу в $h_t$ |
+
+::: {.callout-note title="Почему LSTM победила vanishing gradients?"}
+Ключевое уравнение: $c_t = f_t \odot c_{t-1} + \ldots$
+
+Градиент $\frac{\partial c_t}{\partial c_{t-1}} = f_t$ — это просто поэлементное умножение на числа из [0,1], а **не** умножение на матрицу. При $f_t \approx 1$ (ничего не забываем) градиент проходит без затухания. Именно cell state — это «магистраль» градиентного потока.
+:::
+
+### LSTM в PyTorch
+
+```python
+lstm = nn.LSTM(
+    input_size=64,
+    hidden_size=128,
+    num_layers=2,          # Stacked LSTM
+    batch_first=True,
+    dropout=0.3,           # Dropout между слоями (кроме последнего)
+    bidirectional=False
+)
+
+x = torch.randn(32, 20, 64)
+h0 = torch.zeros(2, 32, 128)   # (num_layers, batch, hidden)
+c0 = torch.zeros(2, 32, 128)   # cell state тоже инициализируем
+
+output, (hn, cn) = lstm(x, (h0, c0))
+# output: (32, 20, 128) — скрытые состояния всех шагов
+# hn, cn: (2, 32, 128)  — финальные состояния обоих слоёв
+```
+
+---
+
+## 4. GRU: Gated Recurrent Unit
+
+GRU (Cho et al., 2014) — упрощение LSTM: нет отдельного cell state, только два вентиля.
+
+### Формулы GRU
+
+$$
+r_t = \sigma(W_r [h_{t-1}, x_t] + b_r) \quad \text{(reset gate)}
+$$
+$$
+z_t = \sigma(W_z [h_{t-1}, x_t] + b_z) \quad \text{(update gate)}
+$$
+$$
+\tilde{h}_t = \tanh(W_h [r_t \odot h_{t-1}, x_t] + b_h) \quad \text{(candidate)}
+$$
+$$
+h_t = (1 - z_t) \odot h_{t-1} + z_t \odot \tilde{h}_t
+$$
+
+### GRU vs LSTM: когда что выбирать?
+
+| Критерий | LSTM | GRU |
+|---|---|---|
+| Параметров (при $d_h$) | $4d_h(d_h + d_x)$ | $3d_h(d_h + d_x)$ |
+| Скорость обучения | медленнее | быстрее |
+| Качество (в среднем) | немного лучше на длинных | сопоставимо |
+| Стандартный совет | сложные задачи | быстрый прототип |
+
+```python
+gru = nn.GRU(input_size=64, hidden_size=128, batch_first=True)
+output, hn = gru(x)  # GRU не имеет cell state
+```
+
+---
+
+## 5. Bidirectional RNN и Deep RNN
+
+### Bidirectional RNN
+
+Стандартная RNN читает последовательность слева направо: $h_t$ знает прошлое, но не будущее. Для многих задач (NER, машинный перевод) контекст справа так же важен.
+
+**Bidirectional RNN** = две независимые RNN, читающие в противоположных направлениях:
+
+$$
+\overrightarrow{h}_t = \text{RNN}(x_t, \overrightarrow{h}_{t-1}) \quad \text{(forward)}
+$$
+$$
+\overleftarrow{h}_t = \text{RNN}(x_t, \overleftarrow{h}_{t+1}) \quad \text{(backward)}
+$$
+$$
+h_t = [\overrightarrow{h}_t; \overleftarrow{h}_t] \quad \text{(конкатенация, размер } 2d_h\text{)}
+$$
+
+::: {.callout-warning title="Ограничение"}
+Bidirectional работает только для энкодеров. В авторегрессивных декодерах (генерация токен за токеном) будущее недоступно — нельзя смотреть вперёд.
+:::
+
+### Deep (Stacked) RNN
+
+Несколько слоёв RNN поверх друг друга: выход нижнего слоя — вход верхнего. Нижние слои учатся локальным паттернам, верхние — абстрактным.
+
+```python
+# Bidirectional + Stacked LSTM
+bilstm = nn.LSTM(
+    input_size=64,
+    hidden_size=128,
+    num_layers=3,
+    batch_first=True,
+    dropout=0.3,
+    bidirectional=True    # выход: (batch, seq, 256)
+)
+
+x = torch.randn(32, 20, 64)
+output, (hn, cn) = bilstm(x)
+# output: (32, 20, 256) — 128*2 из-за bidirectional
+# hn: (6, 32, 128)      — 3 слоя * 2 направления
+```
+
+---
+
+## 6. Работа с переменной длиной: pack_padded_sequence
+
+В реальных батчах последовательности разной длины. Их паддируют до максимальной длины. Но тогда RNN бессмысленно обрабатывает токены паддинга. Решение — **packed sequences**.
+
+```python
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+# lengths — реальные длины каждой последовательности в батче
+# enforce_sorted=False: PyTorch сам отсортирует
+packed_input = pack_padded_sequence(
+    padded_input,       # (batch, max_seq_len, features)
+    lengths,            # (batch,) — реальные длины
+    batch_first=True,
+    enforce_sorted=False
+)
+
+packed_output, (hn, cn) = lstm(packed_input)
+
+# Распаковать обратно
+output, lengths_out = pad_packed_sequence(packed_output, batch_first=True)
+# Позиции паддинга снова заполнены нулями
+```
+
+::: {.callout-tip title="Когда это важно?"}
+`pack_padded_sequence` не только правильнее — оно быстрее. RNN обрабатывает ровно столько шагов, сколько нужно для каждого элемента батча. На задачах с сильно разной длиной (напр., предложения от 5 до 200 слов) ускорение может быть 2–3x.
+:::
+
+---
+
+## 7. Seq2Seq: Encoder-Decoder
+
+### Архитектура
+
+Seq2Seq (Sutskever et al., 2014) — стандартная архитектура для задач типа «последовательность → последовательность» (перевод, суммаризация, dialog):
+
+```
+Encoder:   x₁ x₂ x₃ x₄  →  [LSTM] → context vector c
+Decoder:   c → [LSTM] → ŷ₁ → [LSTM] → ŷ₂ → ...
+```
+
+**Энкодер** читает входную последовательность и сжимает её в вектор контекста $c = h_T^{enc}$ (финальное скрытое состояние). **Декодер** — авторегрессивная языковая модель, инициализированная $c$.
+
+### Teacher Forcing
+
+Во время обучения декодер получает на вход **настоящие** токены, а не свои предсказания. Это сильно ускоряет обучение (нет накопления ошибок), но создаёт **exposure bias**: на инференсе модель видит свои собственные (возможно, неправильные) токены.
+
+```python
+class Seq2SeqDecoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        self.out = nn.Linear(hidden_dim, vocab_size)
+
+    def forward(self, tgt_tokens, encoder_hidden, teacher_forcing_ratio=0.5):
+        # tgt_tokens: (batch, tgt_len)
+        outputs = []
+        input_token = tgt_tokens[:, 0:1]  # <BOS>
+        hidden = encoder_hidden
+
+        for t in range(1, tgt_tokens.size(1)):
+            emb = self.embed(input_token)          # (batch, 1, embed_dim)
+            out, hidden = self.lstm(emb, hidden)
+            logit = self.out(out)                  # (batch, 1, vocab_size)
+            outputs.append(logit)
+
+            # Teacher forcing
+            use_teacher = torch.rand(1).item() < teacher_forcing_ratio
+            if use_teacher:
+                input_token = tgt_tokens[:, t:t+1]
+            else:
+                input_token = logit.argmax(dim=-1)
+
+        return torch.cat(outputs, dim=1)  # (batch, tgt_len-1, vocab_size)
+```
+
+### Beam Search
+
+Жадный декодинг (всегда брать argmax) даёт неоптимальные результаты. **Beam Search** поддерживает $k$ лучших частичных гипотез (beams) и раскрывает наиболее перспективную:
+
+- Ширина луча $k=1$ → жадный поиск
+- $k=5$–$10$ — типичные значения для MT
+- Стоимость: $O(k \cdot V)$ операций на шаг ($V$ — размер словаря)
+
+---
+
+## 8. Проблема узкого места: Fixed Context Vector
+
+Seq2Seq без attention имеет фундаментальную проблему: **весь контекст входной последовательности любой длины нужно сжать в один вектор фиксированного размера**.
+
+На коротких предложениях это терпимо. На длинных (20+ слов) качество перевода резко деградирует. Это мотивирует Attention.
+
+---
+
+## 9. Bahdanau Attention (аддитивный)
+
+Bahdanau, Cho & Bengio (2015) — «Neural Machine Translation by Jointly Learning to Align and Translate» (arXiv:1409.0473) — ключевая работа, задавшая парадигму attention.
+
+### Идея
+
+Вместо одного вектора контекста пусть декодер на каждом шаге $i$ **динамически смотрит** на все состояния энкодера $\{h_1^{enc}, \ldots, h_n^{enc}\}$ и взвешивает их:
+
+$$
+e_{ij} = a(s_{i-1}, h_j) = v_a^\top \tanh(W_a s_{i-1} + U_a h_j)
+$$
+
+$$
+\alpha_{ij} = \frac{\exp(e_{ij})}{\sum_{k=1}^{n} \exp(e_{ik})} \quad \text{(softmax → alignment weights)}
+$$
+
+$$
+c_i = \sum_{j=1}^{n} \alpha_{ij} h_j \quad \text{(context vector для шага } i\text{)}
+$$
+
+Здесь $s_{i-1}$ — скрытое состояние декодера на предыдущем шаге, $h_j$ — состояние энкодера для позиции $j$, $W_a, U_a, v_a$ — обучаемые параметры.
+
+### Alignment matrix
+
+$\alpha_{ij}$ образует матрицу выравнивания (alignment matrix) размера $\text{tgt\_len} \times \text{src\_len}$. Её визуализация показывает, какие слова источника важны при генерации каждого слова перевода. Например, при переводе с французского на английский диагональные блоки показывают соответствие слов, а «la zone» → «the Area» может дать перекрёстный паттерн.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class BahdanauAttention(nn.Module):
+    def __init__(self, enc_hidden, dec_hidden, attn_dim):
+        super().__init__()
+        self.W_a = nn.Linear(dec_hidden, attn_dim, bias=False)
+        self.U_a = nn.Linear(enc_hidden, attn_dim, bias=False)
+        self.v_a = nn.Linear(attn_dim, 1, bias=False)
+
+    def forward(self, s_prev, encoder_outputs):
+        """
+        s_prev:          (batch, dec_hidden)
+        encoder_outputs: (batch, src_len, enc_hidden)
+        """
+        # Расширяем s_prev на src_len
+        s_prev_exp = s_prev.unsqueeze(1)                    # (batch, 1, dec_hidden)
+
+        # Считаем energy scores
+        energy = self.v_a(
+            torch.tanh(
+                self.W_a(s_prev_exp) + self.U_a(encoder_outputs)
+            )
+        ).squeeze(-1)                                        # (batch, src_len)
+
+        # Alignment weights
+        alpha = F.softmax(energy, dim=-1)                   # (batch, src_len)
+
+        # Context vector
+        context = torch.bmm(alpha.unsqueeze(1), encoder_outputs)  # (batch, 1, enc_hidden)
+        context = context.squeeze(1)                              # (batch, enc_hidden)
+
+        return context, alpha
+```
+
+---
+
+## 10. Luong Attention (мультипликативный)
+
+Luong et al. (2015) предложили более простые формулировки attention (глобальный attention):
+
+### Три варианта score-функции
+
+**Dot-product** (требует одинакового размера $d$):
+$$
+e_{ij} = s_i^\top h_j
+$$
+
+**General** (обучаемая матрица $W_a$):
+$$
+e_{ij} = s_i^\top W_a h_j
+$$
+
+**Concat** (аналог Bahdanau):
+$$
+e_{ij} = v_a^\top \tanh(W_a [s_i; h_j])
+$$
+
+### Отличие от Bahdanau
+
+| Аспект | Bahdanau | Luong |
+|---|---|---|
+| Когда применяется attention | До генерации шага $i$ | После генерации шага $i$ |
+| Score | $a(s_{i-1}, h_j)$ | $a(s_i, h_j)$ |
+| Context | Входит в рекуррентную ячейку | Конкатенируется с $s_i$ |
+| Вычислительная сложность | чуть выше | проще |
+
+```python
+class LuongAttention(nn.Module):
+    def __init__(self, hidden_dim, method='general'):
+        super().__init__()
+        self.method = method
+        if method == 'general':
+            self.W_a = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        elif method == 'concat':
+            self.W_a = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
+            self.v_a = nn.Linear(hidden_dim, 1, bias=False)
+
+    def score(self, s, h):
+        if self.method == 'dot':
+            return torch.sum(s * h, dim=-1)              # (batch, src_len)
+        elif self.method == 'general':
+            return torch.sum(s * self.W_a(h), dim=-1)
+        elif self.method == 'concat':
+            s_exp = s.expand_as(h)
+            return self.v_a(torch.tanh(self.W_a(torch.cat([s_exp, h], dim=-1)))).squeeze(-1)
+
+    def forward(self, s, encoder_outputs):
+        # s: (batch, 1, hidden), encoder_outputs: (batch, src_len, hidden)
+        s_exp = s.expand_as(encoder_outputs)
+        scores = self.score(s_exp, encoder_outputs)      # (batch, src_len)
+        alpha = F.softmax(scores, dim=-1)
+        context = torch.bmm(alpha.unsqueeze(1), encoder_outputs).squeeze(1)
+        return context, alpha
+```
+
+---
+
+## 11. Проблемы с длинными последовательностями
+
+### O(n²) сложность attention
+
+Для последовательности длиной $n$ матрица attention имеет размер $n \times n$. Вычислить и хранить её в памяти:
+- $n = 512$: $\approx 1$ МБ (нормально)
+- $n = 4096$: $\approx 64$ МБ (тяжело)
+- $n = 16384$: $\approx 1$ ГБ (только на A100)
+
+Это реальная проблема для документов, аудио, геномных последовательностей.
+
+### Идеи для ускорения (обзор)
+
+**Sparse attention**: не все пары $(i,j)$ важны. Можно считать attention только в окне (local) или для выбранных токенов (Longformer, BigBird).
+
+**Linear attention**: заменить $\text{softmax}(QK^\top)V$ на $\phi(Q)(\phi(K)^\top V)$ — ассоциативность матричного умножения даёт $O(n)$ вместо $O(n^2)$.
+
+**Flash Attention**: не меняет математику, но переписывает вычисления для эффективного использования GPU SRAM — в 2–4 раза быстрее стандартного attention.
+
+::: {.callout-note title="Связь с Transformer"}
+В следующей лекции (06) мы увидим, как Scaled Dot-Product Attention и Multi-Head Attention из статьи «Attention is All You Need» (Vaswani et al., 2017) масштабируют эти идеи и полностью убирают рекуррентность.
+:::
+
+---
+
+## 12. Итоговая практика: сборка Seq2Seq с Attention
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+
+class Encoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers=2, dropout=0.3):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, n_layers,
+                            batch_first=True, dropout=dropout, bidirectional=True)
+        # Проекция из bidirectional (2*hidden) → hidden для декодера
+        self.fc = nn.Linear(2 * hidden_dim, hidden_dim)
+
+    def forward(self, src, src_lengths):
+        # src: (batch, src_len)
+        emb = self.embed(src)                                 # (batch, src_len, embed)
+        packed = pack_padded_sequence(emb, src_lengths.cpu(),
+                                      batch_first=True, enforce_sorted=False)
+        packed_out, (hn, cn) = self.lstm(packed)
+        enc_out, _ = pad_packed_sequence(packed_out, batch_first=True)
+        # enc_out: (batch, src_len, 2*hidden)
+
+        # Инициализация декодера: берём финальный слой forward+backward
+        # hn: (2*n_layers, batch, hidden) → берём -2 и -1
+        hidden = torch.tanh(self.fc(torch.cat([hn[-2], hn[-1]], dim=-1)))
+        return enc_out, hidden  # hidden: (batch, hidden)
+
+
+class AttentionDecoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, attn_dim, n_layers=1):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.attention = BahdanauAttention(2 * hidden_dim, hidden_dim, attn_dim)
+        # Вход: embed + context (2*hidden от bidirectional encoder)
+        self.lstm = nn.LSTM(embed_dim + 2 * hidden_dim, hidden_dim,
+                            n_layers, batch_first=True)
+        self.out = nn.Linear(hidden_dim, vocab_size)
+
+    def forward_step(self, token, hidden, cell, enc_out):
+        emb = self.embed(token)                               # (batch, 1, embed)
+        context, alpha = self.attention(hidden[-1], enc_out)  # context: (batch, 2*hidden)
+        lstm_in = torch.cat([emb, context.unsqueeze(1)], dim=-1)
+        out, (hidden, cell) = self.lstm(lstm_in, (hidden, cell))
+        logit = self.out(out.squeeze(1))                      # (batch, vocab)
+        return logit, hidden, cell, alpha
+
+
+# Обучение
+def train_epoch(model_enc, model_dec, loader, optimizer, criterion, device):
+    model_enc.train(); model_dec.train()
+    total_loss = 0
+
+    for src, src_len, tgt in loader:
+        src, tgt = src.to(device), tgt.to(device)
+        enc_out, hidden = model_enc(src, src_len)
+        cell = torch.zeros_like(hidden).unsqueeze(0)
+        hidden = hidden.unsqueeze(0)
+
+        token = tgt[:, 0:1]
+        loss = 0
+        for t in range(1, tgt.size(1)):
+            logit, hidden, cell, _ = model_dec.forward_step(token, hidden, cell, enc_out)
+            loss += criterion(logit, tgt[:, t])
+            token = tgt[:, t:t+1]  # teacher forcing
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(model_enc.parameters()) + list(model_dec.parameters()), 1.0
+        )
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
+```
+
+---
+
+## Резюме: что выбрать на практике
+
+::: {.callout-tip title="Практические рекомендации"}
+- **Vanilla RNN**: только для учебных целей, не используйте в продакшне
+- **GRU**: быстрый старт, хорош для коротких/средних последовательностей
+- **LSTM**: когда GRU не справляется; стандарт для временных рядов
+- **Bidirectional LSTM/GRU**: для энкодеров, когда нужен полный контекст
+- **Seq2Seq + Bahdanau Attention**: всё ещё работает, особенно при малых данных
+- **Transformer**: лучший выбор, если датасет большой и доступны GPU (лекция 06)
+:::
+
+---
+
+## Что делать дальше
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/05-sequence/basic.html) / [advanced](../../seminars/05-sequence/advanced.html)): реализация RNNCell, сравнение с LSTM на задаче анализа тональности, визуализация Attention.
+- **Семинар** ([basic](../../seminars/05-sequence/basic.html) / [advanced](../../seminars/05-sequence/advanced.html)): реализация RNNCell с нуля, сравнение RNN/LSTM/GRU на анализе тональности, визуализация alignment matrix.
 - **ДЗ**: [05-sequence](../../homework/05-sequence/README.qmd) — классификация текстов с leaderboard.
 :::
 
 ::: {.callout-important title="Минимум на запоминание"}
-1. Sequence models работают с данными переменной длины.
-2. Проблема затухающих градиентов мешает базовой RNN запоминать долгие зависимости.
-3. Вентили (gates) в LSTM и GRU создают "градиентные хайвеи".
-4. Attention позволяет динамически фокусироваться на разных частях входа.
+1. Vanilla RNN страдает от взрывающихся/затухающих градиентов из-за повторного умножения на $W_h$.
+2. LSTM решает проблему через cell state (gradient highway) и систему из 4 вентилей.
+3. GRU — упрощение LSTM с 2 вентилями, часто сопоставимое по качеству.
+4. Seq2Seq узкое место — фиксированный контекстный вектор. Attention даёт декодеру динамический доступ ко всем состояниям энкодера.
+5. Bahdanau attention: $e_{ij} = v_a^\top \tanh(W_a s_{i-1} + U_a h_j)$, веса $\alpha_{ij}$ — softmax по $j$.
+6. `pack_padded_sequence` / `pad_packed_sequence` — must-have для батчей переменной длины.
 :::
+
+---
 
 ## Литература {.appendix}
 

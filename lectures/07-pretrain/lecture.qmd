@@ -1,12 +1,14 @@
 ---
-title: "Лекция 07 — Pre-training и fine-tuning"
-subtitle: "От transfer learning до LoRA и QLoRA"
+title: "Лекция 07 — Pre-training & Fine-tuning"
+subtitle: "Transfer Learning в эпоху LLM: BERT, LoRA, QLoRA и инструктивная настройка"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
   pdf:
     include-in-header:
       - text: |
@@ -14,121 +16,851 @@ format:
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **седьмой core-модуль**. Предполагается знание сверточных сетей (модуль 04), последовательных моделей (модуль 05) и архитектуры Transformer (модуль 06).
-:::
-
-::: {.level-toggle}
-[basic](../../seminars/07-pretrain/basic.html){.active} · [advanced](../../seminars/07-pretrain/advanced.html)
+Это **седьмой core-модуль**. Предполагается знание сверточных сетей (модуль 04), последовательных моделей (модуль 05) и архитектуры Transformer (модуль 06). Модуль даёт полный стек для работы с предобученными языковыми моделями — от теории до кода.
 :::
 
 ## 1. Парадигма Transfer Learning
 
-Обучение глубоких нейронных сетей с нуля требует огромных вычислительных ресурсов и огромных размеченных датасетов. **Transfer learning** (трансферное обучение) предлагает другой путь: использовать знания, полученные моделью при решении одной задачи (обычно на очень большом датасете), для решения другой, целевой задачи.
+### 1.1 Почему обучение с нуля дорого
 
-Основные подходы:
-- **Feature extraction** (извлечение признаков): веса предобученной модели замораживаются (frozen layers), и выходы её промежуточных слоев используются как признаки для обучения нового, обычно небольшого, классификатора (head).
-- **Fine-tuning** (дообучение): веса предобученной модели (все или часть) инициализируются из чекпоинта и обновляются вместе с новым классификатором градиентным спуском на целевой задаче.
+Обучение нейронной сети с нуля требует двух вещей: **огромного датасета** и **огромных вычислений**. GPT-3 был обучен на ~300 млрд токенов (~$4.6M$ по ценам 2020 года). ResNet-50 для ImageNet нужно несколько дней на V100. У большинства исследователей нет ни того, ни другого.
 
-### Почему pretrained модели работают?
+**Transfer learning** (трансферное обучение) решает проблему: берём модель, уже обученную кем-то другим на большом датасете, и адаптируем под нашу задачу.
 
-Секрет кроется в **иерархии признаков** (feature hierarchy). В глубоких сетях, будь то CNN или Transformers, нижние слои (ближе к входу) выучивают общие, низкоуровневые признаки: границы, углы, базовые текстуры в картинках; базовый синтаксис и локальные зависимости в тексте. Эти признаки универсальны. Верхние слои выучивают высокоуровневые признаки, специфичные для задачи (лица людей, конкретные паттерны, семантика определенных доменов). 
+### 1.2 Representation Learning и иерархия признаков
 
-Поэтому низкоуровневые признаки можно переиспользовать практически для любой задачи в том же домене.
+Ключевое открытие: глубокие сети учат **иерархические представления (representations)**. Визуализации нейронов CNN показали:
 
-## 2. Стратегии Fine-Tuning
+- Слои 1–2: грани, углы, цветовые градиенты
+- Слои 3–4: текстуры, паттерны
+- Слои 5+: части объектов, семантические понятия
 
-Выбор стратегии дообучения зависит от размера целевого датасета и его сходства с оригинальным:
+Для трансформеров картина аналогичная:
 
-1. **Full fine-tuning**: все веса сети обновляются. Требует много памяти (нужно хранить состояния оптимизатора для всех параметров) и данных, чтобы не переобучиться (catastrophic forgetting).
-2. **Head-only (Linear Probing)**: обновляется только последний слой. Быстро, требует мало памяти, но ограничено качеством изначально извлеченных признаков.
-3. **Gradual unfreezing** (постепенная разморозка): сначала обучается только head, затем постепенно размораживаются верхние слои сети, и так до нижних. Помогает сохранить стабильность и не разрушить полезные признаки большими градиентами от случайно инициализированного классификатора.
-4. **Differential learning rates**: разные скорости обучения для разных слоев. Обычно нижние слои обучаются с очень малым LR (чтобы сохранить универсальные признаки), а верхние — с большим.
+- Нижние слои: синтаксис, морфология, части речи
+- Средние слои: синтаксические зависимости, кореференция
+- Верхние слои: семантика, прагматика, задачно-специфичные паттерны
 
-## 3. PEFT (Parameter-Efficient Fine-Tuning)
+**Почему это важно для трансфера?** Нижние слои — универсальные. Они работают для любого текста/изображения из того же домена. Значит, их не нужно переучивать заново. Достаточно адаптировать верхние слои под новую задачу.
 
-С ростом моделей (LLM, Foundation Models) full fine-tuning стал невозможен для большинства исследователей (GPT-3 имеет 175B параметров). Возникла потребность в PEFT — методах, которые обучают лишь малую долю параметров, достигая качества, сравнимого с full fine-tuning.
+::: {.callout-tip title="Интуиция: representation learning"}
+Предобученная языковая модель — это не просто "модель для предсказания слов". Это **компрессор знаний о языке**: грамматика, факты о мире, рассуждения — всё это закодировано в матрицах весов. Fine-tuning лишь "направляет" эти знания на конкретную задачу.
+:::
 
-- **Adapter layers**: добавление небольших полносвязных слоев (bottleneck) между существующими слоями трансформера. Обучаются только они.
-- **Prefix tuning / Prompt tuning**: добавление обучаемых векторов (префиксов) к входам каждого слоя слоя внимания (attention) или только к начальному входу модели. Оригинальные веса заморожены.
-- **LoRA (Low-Rank Adaptation)**: наиболее популярный и эффективный метод на сегодня.
+### 1.3 Два классических подхода
 
-## 4. LoRA в деталях
+**Feature extraction (извлечение признаков)**: предобученная модель замораживается полностью. Её выходы (эмбеддинги) используются как входные признаки для нового, небольшого классификатора. Пример: ELMo как статический "encoder", поверх которого обучается BiLSTM.
 
-**LoRA** предлагает не добавлять новые слои, а обучать матрицу обновлений оригинальных весов $\Delta W$, представляя её в виде произведения двух матриц низкого ранга.
+**Fine-tuning (дообучение)**: веса предобученной модели — инициализация, а не заморозка. Весь стек обновляется градиентным спуском на целевой задаче. BERT/GPT-стиль.
 
-Пусть полносвязный слой задается матрицей $W_0 \in \mathbb{R}^{d \times k}$. При обновлении весов мы получаем новую матрицу $W = W_0 + \Delta W$.
-Идея LoRA: представим $\Delta W$ как $B \times A$, где $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, а ранг $r \ll \min(d, k)$.
+| | Feature extraction | Fine-tuning |
+|---|---|---|
+| Вычисления | Дёшево | Дороже |
+| Данных нужно | Мало (только под head) | Больше |
+| Качество | Хуже | Лучше |
+| Catastrophic forgetting | Нет (модель заморожена) | Риск есть |
 
-Форвард пасс выглядит так:
+---
+
+## 2. BERT: Bidirectional Encoder Representations from Transformers
+
+> Devlin et al., 2018 — arXiv:1810.04805
+
+### 2.1 Проблема однонаправленности
+
+До BERT языковые модели были либо **left-to-right** (GPT, LSTM LM), либо **right-to-left** (ELMo частично). Для задач вроде QA или NER это критично: чтобы предсказать слово в середине предложения, нужен **контекст с обеих сторон**.
+
+Проблема: нельзя просто сделать авторегрессионную модель двунаправленной — тогда при обучении каждый токен "видит себя", и задача тривиально решается без осмысленных представлений.
+
+Решение BERT: **Masked Language Modeling (MLM)** — обучать предсказывать замаскированные токены.
+
+### 2.2 Предобучение BERT: две задачи
+
+**Задача 1 — Masked Language Modeling (MLM)**
+
+Случайно маскируем 15% токенов. Для каждого выбранного токена:
+- 80% — заменяем на `[MASK]`
+- 10% — заменяем случайным токеном из словаря
+- 10% — оставляем без изменений
+
+Модель должна предсказать оригинальный токен через softmax над всем словарём. Это позволяет строить **глубокое двунаправленное** представление.
+
+$$
+\mathcal{L}_{\text{MLM}} = -\sum_{i \in \text{masked}} \log P(x_i \mid x_{\setminus i}; \theta)
+$$
+
+Вариация с 10% случайных и 10% без изменений нужна, чтобы модель не привыкала к `[MASK]` — при инференсе их нет.
+
+**Задача 2 — Next Sentence Prediction (NSP)**
+
+Модель получает пару предложений A и B. Задача: предсказать, является ли B следующим предложением после A. 50% — IsNext, 50% — NotNext (случайное предложение из корпуса).
+
+NSP обучает через `[CLS]`-токен: финальное представление `C ∈ R^H` передаётся в бинарный классификатор.
+
+::: {.callout-note title="Дискуссия: нужен ли NSP?"}
+Более поздние работы (RoBERTa, 2019) показали, что NSP **не помогает** и даже мешает. Оказалось, что пары из разных документов дают утечку информации о доменной принадлежности, а не о межпредложенческих связях. RoBERTa убрала NSP и получила лучшие результаты. Тем не менее NSP — важная часть оригинального BERT.
+:::
+
+### 2.3 Архитектура
+
+BERT — это **Transformer Encoder** (только стек энкодеров, без декодера).
+
+| Модель | Слоёв L | Hidden H | Heads A | Параметры |
+|--------|---------|---------|---------|-----------|
+| BERT-BASE | 12 | 768 | 12 | 110M |
+| BERT-LARGE | 24 | 1024 | 16 | 340M |
+
+Размер FFN = 4 × H (3072 для BASE, 4096 для LARGE).
+
+**Входное представление** — сумма трёх эмбеддингов:
+
+$$
+e_i = \text{TokenEmb}(x_i) + \text{SegmentEmb}(s_i) + \text{PositionEmb}(i)
+$$
+
+- **Token embedding**: WordPiece с словарём 30 000 токенов
+- **Segment embedding**: различает предложение A и B (`[SEP]` — разделитель)
+- **Position embedding**: обучаемые (не синусоидальные, как в оригинальном Transformer)
+
+Специальные токены:
+- `[CLS]` — первый токен, его финальное представление используется для классификации
+- `[SEP]` — разделитель между предложениями
+- `[MASK]` — маска для MLM
+
+### 2.4 WordPiece Tokenization
+
+BERT использует **WordPiece** — алгоритм субсловной токенизации. Принцип: частые слова остаются целиком, редкие разбиваются на части. Префикс `##` означает, что кусок является продолжением слова.
+
+```
+"unbelievable" → ["un", "##believ", "##able"]
+"playing" → ["play", "##ing"]
+```
+
+Преимущества: фиксированный словарь, нет OOV-проблемы, редкие слова всё равно представимы.
+
+### 2.5 Fine-tuning BERT
+
+При fine-tuning:
+1. Инициализируем BERT предобученными весами
+2. Добавляем task-specific голову (1–2 слоя)
+3. Обучаем **всё вместе** на целевой задаче
+
+Для разных задач — разные "входы":
+
+| Задача | Вход | Выход |
+|--------|------|-------|
+| Классификация | [CLS] + sentence | C → dense → softmax |
+| Pair classification (NLI) | [CLS] + sent_A + [SEP] + sent_B | C → dense → softmax |
+| Token labeling (NER) | [CLS] + tokens | T_i → dense → label per token |
+| QA (SQuAD) | [CLS] + question + [SEP] + passage | start/end logits на passage |
+
+Рекомендации авторов: learning rate ~ 2e-5 — 5e-5, 3 epochs, batch 32. Fine-tuning на GLUE-задачах занимает минуты на TPU.
+
+**Результаты на GLUE (Test set):**
+
+| Модель | MNLI | QQP | QNLI | SST-2 | STS-B | Avg |
+|--------|------|-----|------|-------|-------|-----|
+| OpenAI GPT | 82.1 | 70.3 | 87.4 | 91.3 | 80.0 | 75.1 |
+| BERT-BASE | 84.6 | 71.2 | 90.5 | 93.5 | 85.8 | 79.6 |
+| BERT-LARGE | 86.7 | 72.1 | 92.7 | 94.9 | 86.5 | 82.1 |
+
+```python
+from transformers import BertTokenizer, BertForSequenceClassification
+import torch
+
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+model = BertForSequenceClassification.from_pretrained(
+    "bert-base-uncased", num_labels=2
+)
+
+# Токенизация пары предложений
+inputs = tokenizer(
+    "The movie was great.",
+    "I loved every minute of it.",
+    return_tensors="pt",
+    padding=True,
+    truncation=True,
+    max_length=128,
+)
+# inputs содержит: input_ids, token_type_ids, attention_mask
+
+outputs = model(**inputs)
+logits = outputs.logits  # [batch, num_labels]
+```
+
+---
+
+## 3. GPT-семейство и Causal Language Modeling
+
+### 3.1 Авторегрессионное предобучение
+
+Пока BERT — энкодер (видит весь контекст), **GPT** (Generative Pre-trained Transformer) — это **декодер**: каждый токен предсказывается, видя только предшествующие токены (causal masking).
+
+$$
+\mathcal{L}_{\text{CLM}} = -\sum_{t=1}^{T} \log P(x_t \mid x_1, \ldots, x_{t-1}; \theta)
+$$
+
+Это стандартное авторегрессионное моделирование. Преимущество: модель обучается на **любом тексте без разметки**. Датасет — весь интернет.
+
+### 3.2 Scaling Laws и Chinchilla
+
+**Scaling laws** (Kaplan et al., 2020): зависимость loss на валидации от числа параметров N и числа токенов D:
+
+$$
+L(N, D) \approx \frac{A}{N^\alpha} + \frac{B}{D^\beta} + L_\infty
+$$
+
+Ключевой вывод: при фиксированном compute-бюджете C ~ N × D оптимально **одновременно масштабировать** и N, и D.
+
+**Chinchilla (Hoffmann et al., 2022)**: пересмотрел scaling laws. Для оптимального обучения: D ≈ **20 × N** токенов. То есть модель на 70B параметров нужно обучать на ~1.4 трлн токенов. GPT-3 (175B, 300B токенов) был **недообучен**!
+
+| Модель | Параметры | Токены | Optimal? |
+|--------|-----------|--------|----------|
+| GPT-3 | 175B | 300B | Недообучен |
+| Chinchilla | 70B | 1.4T | Оптимально |
+| Llama 2 | 70B | 2T | Сверхоптимально |
+
+### 3.3 Llama 2/3: архитектурные отличия
+
+Llama 2/3 (Meta) — открытые модели, ставшие стандартом для fine-tuning. Архитектурные отличия от оригинального Transformer:
+
+- **RMSNorm вместо LayerNorm**: упрощённая нормализация без среднего, только RMS. Быстрее.
+- **Pre-norm вместо Post-norm**: нормализация *перед* sublayer (более стабильное обучение).
+- **SwiGLU вместо ReLU в FFN**: $\text{SwiGLU}(x) = \text{Swish}(W_1 x) \otimes W_2 x$ — лучше качество при том же числе параметров.
+- **RoPE (Rotary Position Embeddings) вместо абсолютных**: позиционная информация кодируется через вращение вектора, лучше обобщается на длинные последовательности.
+- **Grouped Query Attention (GQA)**: несколько голов внимания делят K и V, уменьшая KV-кэш при инференсе.
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "meta-llama/Llama-2-7b-hf"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+)
+
+prompt = "В чём смысл жизни?"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.7)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
+
+---
+
+## 4. Full Fine-Tuning: когда оправдан и каких проблем ждать
+
+### 4.1 Когда нужен full fine-tuning
+
+Full fine-tuning — обновление **всех** параметров модели на целевой задаче. Оправдан когда:
+
+1. **Целевой домен сильно отличается** от предобучения (медицина, право, код — если базовая модель на общем веб-тексте)
+2. **Большой размеченный датасет** (сотни тысяч примеров) — есть чем обучать
+3. **Нет ограничений по памяти** — full FT требует оптимайзер-стейты для всех параметров (~3x размер модели для Adam)
+
+### 4.2 Catastrophic Forgetting
+
+**Catastrophic forgetting** — проблема: при обучении на новой задаче модель "забывает" то, что выучила при предобучении. Особенно опасно при маленьком датасете.
+
+Симптомы: резкое падение качества на general benchmarks после FT на узкой задаче, переобучение на FT-датасет.
+
+**Решения:**
+
+- **Learning rate scheduling**: warm-up + cosine decay. Маленький LR (2e-5 — 5e-5) уменьшает разрушение предобученных весов.
+- **Differential learning rates**: нижние слои обучаются с LR в 10–100x меньше, чем верхние.
+- **Gradual unfreezing**: сначала голова, потом постепенно размораживаем снизу вверх.
+- **Regularization**: L2 к предобученным весам (Elastic Weight Consolidation — EWC).
+
+```python
+from transformers import get_cosine_schedule_with_warmup
+from torch.optim import AdamW
+
+optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
+
+# Warm-up первые 10% шагов, потом cosine decay
+scheduler = get_cosine_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps=total_steps // 10,
+    num_training_steps=total_steps,
+)
+```
+
+### 4.3 Memory Footprint при Full Fine-Tuning
+
+Для модели с N параметрами (fp16) при обучении с Adam:
+- **Параметры**: 2N байт
+- **Оптимайзер**: 8N байт (Adam хранит m и v в fp32)
+- **Градиенты**: 2N байт
+- **Активации**: зависит от batch size и длины последовательности
+
+**Итого**: ~12N байт. Для 7B: ~84 GB. Т.е. full FT Llama-7B требует минимум 2×A100-40GB.
+
+---
+
+## 5. PEFT: Parameter-Efficient Fine-Tuning
+
+С ростом моделей full fine-tuning стал недоступен большинству. **PEFT** — семейство методов, которые обучают малую долю параметров (~0.1–1%), достигая качества, сравнимого с full FT.
+
+### 5.1 Adapter Layers (Houlsby et al., 2019)
+
+Добавляем небольшие **адаптер-модули** между слоями трансформера. Каждый адаптер:
+
+$$
+\text{Adapter}(x) = W_{\text{up}} \cdot \text{GeLU}(W_{\text{down}} \cdot x) + x
+$$
+
+где $W_{\text{down}} \in \mathbb{R}^{d \times r}$ (проекция вниз), $W_{\text{up}} \in \mathbb{R}^{r \times d}$ (проекция вверх), $r \ll d$ — "бутылочное горлышко".
+
+Проблема: добавляет дополнительные слои → **латентность при инференсе** (~8% overhead для r=64).
+
+### 5.2 Prefix Tuning (Li & Liang, 2021)
+
+Добавляем к каждому слою внимания обучаемые "мягкие токены-префиксы" (prefix vectors):
+
+$$
+\text{Attention}(Q, [P_K; K], [P_V; V])
+$$
+
+где $P_K, P_V \in \mathbb{R}^{l \times d}$ — обучаемые матрицы ($l$ — длина префикса). Оригинальные веса заморожены.
+
+**Проблема**: уменьшает полезную длину контекста на $l$ токенов. При длинных последовательностях это существенно. Также нестабильно при малых датасетах.
+
+### 5.3 Prompt Tuning (Lester et al., 2021)
+
+Упрощённая версия prefix tuning: обучаемые токены добавляются только ко **входу первого слоя** (не к каждому). Ещё меньше параметров, но работает хуже на малых моделях. При очень больших моделях (11B+) догоняет full FT.
+
+### 5.4 Сравнение методов PEFT
+
+| Метод | Inference latency | Параметров | Качество |
+|-------|-------------------|------------|---------|
+| Full FT | 1x | 100% | ★★★★★ |
+| Adapters | 1.08x | 0.5–3% | ★★★★ |
+| Prefix Tuning | 1x (но теряем контекст) | 0.1% | ★★★ |
+| Prompt Tuning | 1x | <0.01% | ★★ (малые), ★★★★ (>11B) |
+| **LoRA** | **1x** | **0.1–1%** | **★★★★★** |
+
+---
+
+## 6. LoRA: Low-Rank Adaptation
+
+> Hu et al., 2021 — arXiv:2106.09685
+
+### 6.1 Основная идея
+
+**Ключевая гипотеза** (intrinsic dimensionality): несмотря на размер матриц весов в LLM, **реальные изменения, нужные для адаптации к новой задаче, лежат в пространстве очень низкой размерности**.
+
+Агаджанян и соавторы (2020) показали, что при предобучении языковых моделей обновления весов имеют низкий "внутренний ранг". Hu et al. применили это к fine-tuning.
+
+**LoRA**: вместо обновления $W_0$ напрямую, обучаем **низкоранговое разложение** матрицы обновлений $\Delta W$:
+
+$$
+\Delta W = B \cdot A, \quad B \in \mathbb{R}^{d \times r},\; A \in \mathbb{R}^{r \times k},\; r \ll \min(d, k)
+$$
+
+Forward pass с LoRA:
+
 $$
 h = W_0 x + \Delta W x = W_0 x + B A x
 $$
 
-Матрица $A$ инициализируется случайно из нормального распределения, а $B$ инициализируется нулями. Таким образом, в начале обучения $\Delta W = 0$, и модель работает ровно как оригинальная. Обучаются только $A$ и $B$.
+Оба слагаемых вычисляются параллельно и суммируются.
 
-### Почему это работает?
-Гипотеза "внутренней размерности" (intrinsic rank hypothesis) гласит, что, несмотря на огромный размер матриц весов в LLM, реальные изменения, необходимые для адаптации к новой задаче, лежат в пространстве очень низкой размерности. Поэтому малого ранга $r$ (часто $r=4$ или $r=8$) достаточно для успешного fine-tuning.
+### 6.2 Инициализация
 
-*Преимущество LoRA*: после обучения матрицы $W_0$ и $BA$ можно просто сложить ($W_{\text{merged}} = W_0 + BA$). В результате мы получаем модель без overhead'а на инференс (в отличие от адаптеров).
+- **A**: инициализируется случайно из $\mathcal{N}(0, \sigma^2)$ — стандартная инициализация нейросети
+- **B**: инициализируется **нулями** — чтобы $\Delta W = BA = 0$ в начале обучения
 
-## 5. QLoRA: Quantization + LoRA
+Это гарантирует, что в самом начале модель работает ровно как оригинальная предобученная модель. Обучение начинается с правильной точки, без случайного смещения весов.
 
-Для дообучения гигантских моделей даже LoRA может не хватать, так как оригинальные веса $W_0$ в FP16 всё ещё занимают много VRAM. **QLoRA** комбинирует LoRA с квантованием.
+### 6.3 Масштабирование: alpha
 
-### Основы квантования (Quantization)
-Квантование — это процесс сжатия чисел с плавающей точкой (FP32/FP16) в целые числа меньшей разрядности (INT8, INT4).
-- **INT8 (absmax / zero-point)**: находим максимальное по модулю значение в тензоре, и масштабируем все значения в диапазон [-127, 127]. 
-- **INT4, GPTQ, AWQ**: более агрессивные методы, учитывающие важность весов для минимизации ошибки активации.
+Выход LoRA масштабируется на $\frac{\alpha}{r}$:
 
-В QLoRA базовая модель $W_0$ квантуется до 4 бит с помощью специального формата **NF4 (NormalFloat4)**, оптимизированного для нормально распределенных весов нейросетей. При прямом проходе (forward pass) веса $W_0$ на лету деквантуются в FP16 для умножения на вход $x$, а вычисление $BAx$ происходит параллельно в FP16. Обучаемые матрицы $A$ и $B$ хранятся и обновляются в FP16/FP32.
+$$
+h = W_0 x + \frac{\alpha}{r} \cdot B A x
+$$
 
-Также используется **Double Quantization** (квантование самих констант квантования) и **Paged Optimizers** (перенос состояний оптимизатора в CPU RAM при нехватке видеопамяти).
+Гиперпараметр $\alpha$ — константа (часто $\alpha = r$ или $\alpha = 2r$). При оптимизации Adam, настройка $\alpha$ эквивалентна настройке learning rate при соответствующей инициализации. Практика: задаём $\alpha$ равным первому пробному $r$ и не тюним отдельно. Это упрощает поиск гиперпараметров при смене ранга.
 
-## 6. Prompting vs Fine-Tuning
+### 6.4 Какие матрицы адаптировать
 
-Когда стоит делать fine-tuning, а когда достаточно промптинга?
+В трансформере есть матрицы $W_q, W_k, W_v, W_o$ (внимание) и $W_1, W_2$ (FFN).
 
-- **Zero-shot / Few-shot prompting**: не требует обучения, дешево. Хорошо работает на задачах, где модель уже имеет нужные знания из pre-training. Недостаток: ограничение длины контекста, сложность задания специфичных форматов (JSON, структурированные ответы).
-- **Chain-of-Thought (CoT)**: промпт заставляет модель генерировать пошаговые рассуждения. Улучшает качество на логических и математических задачах.
-- **Fine-tuning**: нужен, когда:
-  1. Нужно научить модель строгому формату ответа, который тяжело описать в промпте.
-  2. В задаче используется специфичный доменный язык или знания, которых не было в pre-training.
-  3. Нужно максимизировать метрики на конкретной, узкой задаче, где few-shot уже не дает улучшений.
+Hu et al. исследовали разные комбинации. **Вывод**: при фиксированном числе параметров лучше адаптировать $W_q$ и $W_v$ (или все матрицы внимания), чем один тип, но с бо́льшим рангом.
 
-## 7. Практика: HuggingFace PEFT
+Типичные настройки:
+- `target_modules = ["q_proj", "v_proj"]` — минимум, хорошее качество
+- `target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]` — все attention
+- `target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]` — все, включая FFN (максимальное качество)
 
-Библиотека `peft` от HuggingFace — стандарт де-факто для работы с LoRA.
+### 6.5 Подсчёт параметров
 
-```python
-from transformers import AutoModelForSequenceClassification
-from peft import LoraConfig, get_peft_model
+Для одного LoRA-слоя: $r \cdot d + r \cdot k = r(d + k)$ параметров против $d \cdot k$ у оригинала.
 
-# 1. Загружаем базовую модель
-model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
+Пример для BERT-BASE (d=k=768, 12 слоёв, r=8, адаптируем q и v):
 
-# 2. Создаем конфигурацию LoRA
-config = LoraConfig(
-    r=8, 
-    lora_alpha=32, 
-    target_modules=["query", "value"], # К каким слоям применяем (обычно attention)
-    lora_dropout=0.05,
-    bias="none",
-    task_type="SEQ_CLS"
-)
+$$
+\text{LoRA params} = 2 \times 12 \times r \times (d + d) = 2 \times 12 \times 8 \times 1536 = 294\,912
+$$
 
-# 3. Оборачиваем модель
-peft_model = get_peft_model(model, config)
-peft_model.print_trainable_parameters()
-# Вывод: trainable params: 294,912 || all params: 109,777,154 || trainable%: 0.268%
+$$
+\text{Доля} = \frac{294\,912}{110\,000\,000} \approx 0.27\%
+$$
+
+Для LLaMA-7B с `r=8`, все attention матрицы — ~0.5% параметров обучаются.
+
+### 6.6 Merge при инференсе: нулевой overhead
+
+После обучения матрицы можно **просто сложить** с оригинальными весами:
+
+$$
+W_{\text{merged}} = W_0 + BA
+$$
+
+При инференсе никакого overhead нет — это та же архитектура, что и базовая модель. В отличие от адаптеров, которые добавляют слои и замедляют инференс.
+
+При переключении задачи: вычитаем старый $BA$, добавляем новый $B'A'$.
+
+### 6.7 Выбор ранга r
+
+| r | Параметры | Когда использовать |
+|---|-----------|-------------------|
+| 4 | ~0.1% | Простые задачи, малые датасеты |
+| 8 | ~0.3% | Хорошее соотношение качество/размер (default) |
+| 16 | ~0.6% | Сложные задачи, хочется больше capacity |
+| 64 | ~2% | Почти как full FT; редко нужно больше |
+| 128+ | — | Практически нет смысла, почти full FT |
+
+::: {.callout-important title="Правило большого пальца по LoRA"}
+Начинайте с `r=8, alpha=16`. Если качество недостаточно — увеличьте `r` до 16 или 32. LoRA очень плохо работает при `r=1–2`, если задача нетривиальна. Для instruction tuning LLM — `r=16–64`.
+:::
+
+---
+
+## 7. QLoRA: Quantization + LoRA
+
+> Dettmers et al., 2023
+
+### 7.1 Проблема, которую решает QLoRA
+
+Даже с LoRA базовые веса $W_0$ хранятся в fp16 → 7B модель занимает ~14 GB VRAM, 13B — ~26 GB, 70B — ~140 GB. Для большинства GPU это слишком много.
+
+**QLoRA**: квантуем $W_0$ до 4 бит + применяем LoRA в fp16.
+
+### 7.2 NF4 (NormalFloat4)
+
+Обычная INT4-квантизация: равномерно делим диапазон значений на 16 уровней. Проблема: веса нейросетей имеют **нормальное распределение** — много значений около нуля, мало на краях. Равномерная квантизация неоптимальна.
+
+**NF4 (NormalFloat4)**: квантизационные уровни выбраны так, чтобы **каждый уровень содержал равное количество значений** при нормальном распределении. По сути, это квантили нормального распределения, нормализованные в [-1, 1].
+
+Это оптимально по информационной теории для нормально распределённых данных. Ошибка квантизации минимальна при нормальных весах.
+
+### 7.3 Double Quantization
+
+Сами константы квантизации (scale factors) тоже занимают память. При блочной квантизации (blocksize=64) на каждый блок 64 значений — одна константа fp32 = 0.5 бита на параметр overhead.
+
+**Double Quantization**: квантуем сами scale factors (fp32 → fp8). Это снижает overhead с ~0.5 до ~0.127 бита на параметр. Экономия ~0.37 бит/параметр.
+
+### 7.4 Paged Optimizers
+
+При обучении большой модели оптимайзер-стейты (Adam: m, v в fp32) огромны. Если VRAM заканчивается — CUDA out of memory.
+
+**Paged Optimizers**: используют **unified memory** NVIDIA — оптимайзер-стейты автоматически переносятся в RAM CPU при пиковой нагрузке и подкачиваются обратно. Никаких явных OOM. Overhead минимален (только при реальной нехватке VRAM).
+
+### 7.5 Как работает QLoRA на практике
+
+```
+Forward pass:
+  x → dequant(W_0_4bit, fp16) × x → h_base  [дквантование на лету]
+                +
+  x → A × x → B × (Ax) → h_lora            [LoRA в fp16]
+
+  output = h_base + h_lora
+
+Backward pass:
+  Градиенты только для A и B (fp16)
+  W_0 не обновляется (заморожен в 4-bit)
 ```
 
+Память для 7B модели:
+- Без QLoRA (fp16): ~14 GB
+- С QLoRA (NF4 + LoRA r=64): ~5–6 GB
+
+Это значит, что 7B можно файн-тюнить на RTX 3090 (24 GB), а 70B — на 2×A100.
+
+---
+
+## 8. Практика с PEFT библиотекой
+
+### 8.1 Установка
+
+```bash
+pip install transformers peft accelerate bitsandbytes datasets
+```
+
+### 8.2 LoRA с PEFT
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
+import torch
+
+model_id = "meta-llama/Llama-2-7b-hf"
+
+# Загружаем базовую модель
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+tokenizer.pad_token = tokenizer.eos_token
+
+# LoRA конфигурация
+lora_config = LoraConfig(
+    r=16,                           # Ранг
+    lora_alpha=32,                  # Масштабирование (обычно 2*r)
+    target_modules=[
+        "q_proj", "k_proj",
+        "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_dropout=0.05,
+    bias="none",                    # LoRA не обучает biases
+    task_type=TaskType.CAUSAL_LM,
+)
+
+# Оборачиваем модель в LoRA
+peft_model = get_peft_model(model, lora_config)
+peft_model.print_trainable_parameters()
+# trainable params: 167,772,160 || all params: 6,906,095,616 || trainable%: 2.43%
+```
+
+### 8.3 QLoRA с BitsAndBytes
+
+```python
+from transformers import BitsAndBytesConfig
+from peft import prepare_model_for_kbit_training
+
+# 4-bit конфигурация
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",           # NF4 квантизация
+    bnb_4bit_compute_dtype=torch.bfloat16, # Compute dtype для деквантования
+    bnb_4bit_use_double_quant=True,       # Double quantization
+)
+
+# Загружаем модель в 4 бита
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    quantization_config=bnb_config,
+    device_map="auto",
+)
+
+# Подготавливаем модель для kbit-обучения
+# (включает gradient checkpointing, cast normalization layers)
+model = prepare_model_for_kbit_training(model)
+
+# Добавляем LoRA поверх квантованной модели
+lora_config = LoraConfig(
+    r=64,
+    lora_alpha=128,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.1,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM,
+)
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+# trainable params: 41,943,040 || all params: 3,638,792,192 || trainable%: 1.15%
+```
+
+### 8.4 Обучение с Trainer
+
+```python
+from transformers import TrainingArguments, Trainer, DataCollatorForLanguageModeling
+from datasets import load_dataset
+
+dataset = load_dataset("json", data_files={"train": "train.jsonl"})
+
+training_args = TrainingArguments(
+    output_dir="./llama-lora-finetuned",
+    num_train_epochs=3,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,      # Effective batch = 16
+    warmup_ratio=0.05,
+    learning_rate=2e-4,                 # LoRA учится быстрее, можно бо́льший LR
+    fp16=False,
+    bf16=True,                          # Bfloat16 для современных GPU
+    logging_steps=10,
+    save_strategy="epoch",
+    optim="paged_adamw_8bit",           # Paged optimizer для QLoRA
+    report_to="wandb",
+    gradient_checkpointing=True,        # Ещё больше экономим память
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=dataset["train"],
+    data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+)
+
+trainer.train()
+```
+
+### 8.5 Сохранение и загрузка LoRA-адаптеров
+
+```python
+# Сохраняем только LoRA-веса (несколько десятков MB вместо нескольких GB)
+model.save_pretrained("./lora-adapter")
+tokenizer.save_pretrained("./lora-adapter")
+
+# Загрузка: базовая модель + адаптер
+from peft import PeftModel
+
+base_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+model = PeftModel.from_pretrained(base_model, "./lora-adapter")
+
+# Мёрж: объединяем LoRA в базовые веса для быстрого инференса
+merged_model = model.merge_and_unload()
+merged_model.save_pretrained("./merged-model")
+```
+
+---
+
+## 9. Instruction Tuning: от языковой модели к ассистенту
+
+### 9.1 Проблема базовой языковой модели
+
+Base LLM обучен предсказывать следующий токен. При вопросе "Как дела?" он может ответить просто ещё одним вопросом (как в веб-тексте). Он не "понимает", что от него ожидается ответ-ответ на вопрос пользователя.
+
+**Instruction Tuning (SFT — Supervised Fine-Tuning)**: обучаем модель следовать инструкциям, форматируя данные как диалоги или "инструкция → ответ".
+
+### 9.2 Формат SFT-датасета
+
+Данные для instruction tuning — это пары или диалоги:
+
+```json
+{"instruction": "Переведи на английский",
+ "input": "Я люблю программировать",
+ "output": "I love programming"}
+```
+
+Или в chat-формате:
+
+```json
+{"messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "What is the capital of France?"},
+    {"role": "assistant", "content": "The capital of France is Paris."}
+]}
+```
+
+### 9.3 Chat Templates и Special Tokens
+
+Каждая модель имеет свой **chat template** — шаблон форматирования диалога. Токенизатор HuggingFace поддерживает их нативно.
+
+**Llama 2 chat format:**
+```
+[INST] <<SYS>>
+You are a helpful assistant.
+<</SYS>>
+
+What is the capital of France? [/INST] The capital of France is Paris.
+```
+
+**ChatML format (используется Mistral, Qwen и др.):**
+```
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+What is the capital of France?<|im_end|>
+<|im_start|>assistant
+The capital of France is Paris.<|im_end|>
+```
+
+```python
+# Применяем chat template через tokenizer
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "What is 2+2?"},
+    {"role": "assistant", "content": "2+2 = 4."},
+]
+
+formatted = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=False,  # True при инференсе
+)
+print(formatted)
+```
+
+### 9.4 Data Masking при SFT
+
+При обучении SFT **лосс считается только по токенам ответа ассистента**, а не по всему тексту (иначе обучаем предсказывать промпты, что не нужно).
+
+```python
+# TRL's SFTTrainer делает это автоматически
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+
+# Или вручную через маску
+response_template = "[/INST]"
+collator = DataCollatorForCompletionOnlyLM(
+    response_template=response_template,
+    tokenizer=tokenizer,
+)
+```
+
+### 9.5 Популярные SFT датасеты
+
+| Датасет | Размер | Описание |
+|---------|--------|----------|
+| Alpaca | 52K | GPT-4 генерированные instruction-response пары |
+| OpenHermes-2.5 | 1M | Смесь разных instruction datasets |
+| ShareGPT | 90K | Реальные диалоги с ChatGPT |
+| LIMA | 1K | Только 1000 высококачественных примеров |
+| Dolly-15K | 15K | Размечено людьми от Databricks |
+
+::: {.callout-note title="Качество важнее количества"}
+LIMA (2023) показал, что **1000 высококачественных примеров** дают модель лучше, чем 50K шумных. Качество куратирования данных для SFT критически важно.
+:::
+
+---
+
+## 10. Evaluation: как измерять качество
+
+### 10.1 GLUE и SuperGLUE
+
+**GLUE (General Language Understanding Evaluation)** — бенчмарк из 9 задач NLU:
+
+| Задача | Тип | Описание |
+|--------|-----|----------|
+| CoLA | Acceptability | Грамматически корректно? |
+| SST-2 | Sentiment | Позитивно/негативно? |
+| MRPC | Paraphrase | Одинаковый смысл? |
+| QQP | Paraphrase | Одинаковый вопрос? |
+| MNLI | NLI | Entailment/Neutral/Contradiction |
+| QNLI | QA → NLI | Содержит ли ответ? |
+| RTE | NLI | Entailment/Not entailment |
+| WNLI | Coreference | Entailment? |
+| STS-B | Similarity | Косинусное сходство |
+
+**SuperGLUE** — более сложная версия GLUE, введена когда BERT насытил GLUE.
+
+```python
+import evaluate
+from transformers import pipeline
+
+# Загружаем метрику
+glue_metric = evaluate.load("glue", "sst2")
+
+# Пример: evaluate модели на SST-2
+pipe = pipeline("text-classification", model="textattack/bert-base-uncased-SST-2")
+predictions = pipe(["I love this movie!", "This film is terrible."])
+labels = [1, 0]  # 1=positive, 0=negative
+
+result = glue_metric.compute(
+    predictions=[1 if p["label"] == "POSITIVE" else 0 for p in predictions],
+    references=labels,
+)
+print(result)  # {'accuracy': 1.0}
+```
+
+### 10.2 MMLU (Massive Multitask Language Understanding)
+
+57 академических задач: математика, история, право, медицина, CS и т.д. Каждая — 4-choice MCQ. Тестирует **знания** модели, а не только языковые способности.
+
+```python
+from lm_eval import evaluator
+
+# lm-evaluation-harness — стандартный инструмент
+results = evaluator.simple_evaluate(
+    model="hf",
+    model_args="pretrained=meta-llama/Llama-2-7b-chat-hf",
+    tasks=["mmlu"],
+    num_fewshot=5,
+    batch_size="auto",
+)
+print(results["results"]["mmlu"])
+# {'acc': 0.458, 'acc_stderr': 0.004, ...}
+```
+
+### 10.3 Практическая оценка: evaluate + lm-harness
+
+```bash
+# Установка
+pip install lm-eval
+
+# Оценка модели на нескольких бенчмарках
+lm_eval --model hf \
+  --model_args pretrained=./merged-model \
+  --tasks mmlu,hellaswag,arc_easy,arc_challenge,winogrande \
+  --num_fewshot 5 \
+  --batch_size 8 \
+  --output_path results.json
+```
+
+```python
+import evaluate
+
+# Библиотека evaluate от HuggingFace
+accuracy = evaluate.load("accuracy")
+f1 = evaluate.load("f1")
+rouge = evaluate.load("rouge")    # Для генеративных задач
+bleu = evaluate.load("bleu")      # Для перевода
+
+# Combine metrics
+from evaluate import combine
+clf_metrics = combine(["accuracy", "f1", "precision", "recall"])
+result = clf_metrics.compute(predictions=preds, references=labels)
+```
+
+### 10.4 Что измерять при fine-tuning LLM
+
+- **Задачно-специфичные метрики**: accuracy/F1 для классификации, ROUGE для суммаризации, BLEU для перевода
+- **General capability**: проверить, что модель не деградировала на общих задачах (MMLU до и после FT)
+- **Instruction following**: MT-Bench, AlpacaEval — оценка GPT-4 или judge-моделью
+- **Safety**: проверка на токсичность, галлюцинации
+
+---
+
+## 11. Итого: как выбрать метод для вашей задачи
+
+```
+Есть задача → нужен fine-tuning?
+├── Датасет < 1K примеров → Few-shot prompting или Prompt Tuning
+├── Датасет 1K–100K примеров
+│   ├── Память ограничена (1 GPU) → QLoRA (r=16–64)
+│   └── Память есть (4+ GPU) → LoRA или Full FT
+└── Датасет > 100K + специфичный домен → Full Fine-Tuning
+    (если модель может быть изначально слишком далека от домена)
+```
+
+::: {.callout-tip title="Практический чеклист для LoRA/QLoRA"}
+1. Начинайте с `r=8`, `alpha=16`, `target_modules=["q_proj","v_proj"]`
+2. Если не хватает качества — увеличьте `r` до 16 или 32
+3. Если хотите максимум — адаптируйте все матрицы включая FFN
+4. Learning rate для LoRA: 1e-4 — 3e-4 (выше, чем для full FT)
+5. Всегда проверяйте `print_trainable_parameters()` — должно быть < 5%
+6. Для QLoRA: `bnb_4bit_quant_type="nf4"`, `bnb_4bit_use_double_quant=True`
+7. Оптимайзер: `paged_adamw_8bit` для QLoRA, `adamw_torch` для LoRA
+:::
+
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/07-pretrain/basic.html) / [advanced](../../seminars/07-pretrain/advanced.html)): Сравнение стратегий fine-tuning на CNN и реализация LoRA слоя с нуля для трансформера.
-- **ДЗ**: [07-pretrain](../../homework/07-pretrain/README.qmd) — Исследовательская задача: применить LoRA к вашей собственной задаче, провести ablation study по рангам и написать анализ.
+- **Семинар** ([basic](../../seminars/07-pretrain/basic.html) / [advanced](../../seminars/07-pretrain/advanced.html)): Реализация LoRA-слоя с нуля, сравнение LoRA vs full FT на GLUE-задаче, QLoRA на Llama.
+- **ДЗ**: [07-pretrain](../../homework/07-pretrain/README.qmd) — Ablation study по рангам LoRA, instruction tuning собственной модели, оценка на MMLU.
 :::
 
 ::: {.callout-important title="Минимум на запоминание"}
-1. Transfer learning позволяет переиспользовать знания (универсальные признаки) из моделей, обученных на гигантских данных.
-2. LoRA представляет обновление весов $\Delta W$ как $BA$ низкого ранга, экономя огромное количество параметров без потери качества. $W_{\text{new}} = W_0 + BA$.
-3. QLoRA сжимает $W_0$ до 4 бит (NF4), позволяя дообучать огромные модели на обычных GPU.
+1. **BERT**: MLM (предсказываем 15% замаскированных токенов с обеих сторон) + NSP. Архитектура: Transformer Encoder, WordPiece токенизатор, [CLS]-токен для классификации.
+
+2. **GPT/Causal LM**: авторегрессионное предсказание слева направо. Chinchilla: оптимально обучать на 20N токенов для модели с N параметрами.
+
+3. **LoRA**: $\Delta W = BA$, $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, $r \ll \min(d,k)$. B=0 при инициализации. После обучения: $W_{\text{new}} = W_0 + \frac{\alpha}{r} BA$. Zero inference overhead при мёрже.
+
+4. **QLoRA**: базовая модель в NF4 (4 bit, оптимально для нормально распределённых весов) + LoRA-адаптеры в bf16. Double quantization + paged optimizers снижают memory footprint 2–3x по сравнению с обычным LoRA.
+
+5. **Instruction Tuning**: SFT на парах (инструкция, ответ) с chat template. Лосс считается только по токенам ответа. Качество данных важнее количества.
 :::

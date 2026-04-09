@@ -1,136 +1,967 @@
 ---
-title: "Лекция 01 — Backprop и autograd с нуля"
-subtitle: "Вычислительные графы, автоматическое дифференцирование и PyTorch internals"
+title: "Лекция 01 — Backpropagation & Automatic Differentiation"
+subtitle: "Вычислительные графы, цепное правило, mini-autograd на numpy, PyTorch internals"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **первый core-модуль**. Мы начинаем с самых основ: как нейронные сети вычисляют градиенты для обновления своих весов. Понимание autograd — ключ к отладке любых современных DL-архитектур. Дальше мы перейдём к полносвязным сетям (MLP) и нормализациям (модули 02–03).
+Это **первый core-модуль**. Мы начинаем с фундамента: как именно нейронные сети вычисляют градиенты и почему это работает за разумное время. Без глубокого понимания autograd невозможно грамотно отлаживать обучение, писать кастомные слои или разбираться в продвинутых техниках (gradient checkpointing, second-order methods, meta-learning). Модули 02–10 будут активно опираться на этот материал.
 :::
 
-::: {.level-toggle}
-[basic](../../seminars/01-backprop/basic.html){.active} · [advanced](../../seminars/01-backprop/advanced.html)
+## 1. Мотивация: зачем автоматически считать градиенты
+
+### 1.1 Задача оптимизации в глубоком обучении
+
+Обучение нейронной сети — это задача минимизации функции потерь $L(\theta)$ по параметрам $\theta \in \mathbb{R}^P$. Типичная современная модель имеет $P \sim 10^7$–$10^{11}$ параметров. Метод первого порядка — градиентный спуск:
+
+$$
+\theta_{t+1} = \theta_t - \eta \, \nabla_\theta L(\theta_t)
+$$
+
+Всё обучение сводится к тому, чтобы снова и снова вычислять $\nabla_\theta L$ и делать шаг. Значит, нам критически важно уметь вычислять этот градиент **быстро** и **точно**.
+
+### 1.2 Три подхода к вычислению производных
+
+Рассмотрим три варианта и сравним их:
+
+**Символьное дифференцирование** (как в Mathematica/SymPy). Система раскрывает аналитическую формулу для производной. Работает для простых выражений, но страдает от *expression swell* — формула для градиента глубокой сети может быть экспоненциально больше самой сети. На практике неприменимо.
+
+**Численное дифференцирование** (конечные разности). Для каждого параметра $\theta_i$:
+
+$$
+\frac{\partial L}{\partial \theta_i} \approx \frac{L(\theta + \epsilon \mathbf{e}_i) - L(\theta - \epsilon \mathbf{e}_i)}{2\epsilon}
+$$
+
+Требует $2P$ прямых проходов для $P$ параметров. При $P = 10^8$ это катастрофически медленно. Плюс численные ошибки: слишком малое $\epsilon$ даёт ошибки округления, слишком большое — ошибки аппроксимации.
+
+**Автоматическое дифференцирование (autograd)**. Вычисляет точные (до машинной точности) градиенты за время $O(1)$ прямых проходов. Это то, что используют все современные фреймворки.
+
+::: {.callout-tip title="Историческая справка"}
+Идею обратного распространения ошибки независимо открывали несколько раз. Пол Вербос описал её в своей диссертации в 1974 году [@werbos1974beyond], но широкое внимание алгоритм получил после знаменитой статьи Румельхарта, Хинтона и Уильямса в Nature в 1986 году [@rumelhart1986learning]. Современное понимание autograd как более общей техники (не только для нейросетей) систематизировано в обзоре Байдина и соавторов [@baydin2018automatic].
 :::
 
-## 1. Мотивация: зачем считать градиенты автоматически
+---
 
-Обучение нейронной сети сводится к минимизации функции потерь $L(\theta)$ по параметрам $\theta$. Чтобы обновить параметры с помощью градиентного спуска:
+## 2. Вычислительный граф
+
+### 2.1 Что такое вычислительный граф
+
+Любое вычисление можно представить как **направленный ациклический граф (DAG)**:
+
+- **Листья** (leaf nodes) — входные данные и параметры модели
+- **Внутренние узлы** — элементарные операции: сложение, умножение, `exp`, `relu`, `matmul` и т.д.
+- **Корень** — итоговый скаляр (функция потерь $L$)
+- **Рёбра** — потоки данных (тензоры) между узлами
+
+Рассмотрим пример: $f(x, y, z) = (x + y) \cdot z$, где $x = -2, y = 5, z = -4$.
+
+```
+x = -2   y = 5
+  \       /
+   [  +  ]  →  q = 3
+       \
+        \   z = -4
+         \ /
+          [  ×  ]  →  f = -12
+```
+
+**Прямой проход** (forward pass): вычисляем значения слева направо, от листьев к корню. Промежуточные результаты: $q = x + y = 3$, $f = q \cdot z = -12$.
+
+**Обратный проход** (backward pass): вычисляем градиенты справа налево, от корня к листьям.
+
+### 2.2 Почему граф, а не просто формула
+
+Граф явно отображает зависимости между переменными, что позволяет:
+
+1. Мемоизировать промежуточные значения (нужны для backprop)
+2. Находить эффективный порядок вычислений (топологическая сортировка)
+3. Параллелизировать независимые ветки
+4. Реализовать `retain_graph`, gradient checkpointing и другие оптимизации памяти
+
+---
+
+## 3. Цепное правило (Chain Rule)
+
+### 3.1 Скалярный случай
+
+Пусть $y = f(u)$, $u = g(x)$. Тогда $y = f(g(x))$ и:
+
 $$
-\theta_{t+1} = \theta_t - \eta \nabla_\theta L(\theta_t)
-$$
-нам необходимо вычислить $\nabla_\theta L$. 
-
-Считать градиенты аналитически вручную на бумаге — долго и чревато ошибками. Считать численно (через конечные разности $\frac{L(\theta + \epsilon) - L(\theta)}{\epsilon}$) — слишком медленно, так как требует $O(|\theta|)$ прямых проходов по сети для одного обновления. 
-
-Автоматическое дифференцирование (autograd) решает эту проблему: оно позволяет точно и эффективно вычислять градиенты для любых дифференцируемых программ за время, сопоставимое с одним прямым проходом.
-
-## 2. Вычислительный граф и обратный проход
-
-Любая математическая формула или программа может быть представлена как направленный ациклический граф (DAG), где:
-- **Вершины** — это элементарные математические операции ($+$, $\times$, $\exp$) или входные значения (данные, веса).
-- **Рёбра** — это потоки данных (промежуточные тензоры или скаляры).
-
-### Прямой проход (Forward pass)
-Во время прямого прохода мы вычисляем выход сети по заданным входам, двигаясь от листьев графа к корню (функции потерь).
-
-### Обратный проход (Backward pass)
-Обратный проход основан на **цепном правиле (chain rule)** дифференцирования. Если $y = f(u)$ и $u = g(x)$, то:
-$$
-\frac{\partial y}{\partial x} = \frac{\partial y}{\partial u} \frac{\partial u}{\partial x}
+\frac{dy}{dx} = \frac{dy}{du} \cdot \frac{du}{dx}
 $$
 
-В терминах вычислительного графа: чтобы найти градиент функции потерь $L$ по какому-то узлу $x$, мы берём градиент, пришедший сверху $\frac{\partial L}{\partial y}$ (global gradient), умножаем его на локальный градиент $\frac{\partial y}{\partial x}$ (local gradient) и передаём дальше вниз.
+Это **цепное правило** — основа всего backpropagation. Для цепочки из $n$ операций:
 
-<!-- TODO: нужна TikZ схема: простой вычислительный граф для выражения f(x, y, z) = (x + y) * z с прямым и обратным проходами -->
+$$
+\frac{dL}{dx_1} = \frac{dL}{dx_n} \cdot \frac{dx_n}{dx_{n-1}} \cdot \ldots \cdot \frac{dx_2}{dx_1}
+$$
 
-::: {.callout-tip title="Где это в DL_BOOK"}
-Глава 6.5 «Back-Propagation and Other Differentiation Algorithms» подробно разбирает алгоритм обратного распространения ошибки на графах.
+Порядок умножения важен: мы идём от $L$ назад к $x_1$.
+
+### 3.2 Пример: разбор по шагам
+
+Вернёмся к $f = (x + y) \cdot z$ при $x=-2, y=5, z=-4$, $q = x + y = 3$, $f = qz = -12$.
+
+Хотим найти $\frac{\partial f}{\partial x}$, $\frac{\partial f}{\partial y}$, $\frac{\partial f}{\partial z}$.
+
+**Шаг 1.** Инициализируем: $\frac{\partial f}{\partial f} = 1$.
+
+**Шаг 2.** Узел умножения $f = q \cdot z$:
+$$
+\frac{\partial f}{\partial q} = z = -4, \quad \frac{\partial f}{\partial z} = q = 3
+$$
+
+**Шаг 3.** Узел сложения $q = x + y$:
+$$
+\frac{\partial f}{\partial x} = \frac{\partial f}{\partial q} \cdot \frac{\partial q}{\partial x} = (-4) \cdot 1 = -4
+$$
+$$
+\frac{\partial f}{\partial y} = \frac{\partial f}{\partial q} \cdot \frac{\partial q}{\partial y} = (-4) \cdot 1 = -4
+$$
+
+Итог: $\nabla f = (-4, -4, 3)$.
+
+### 3.3 Векторный случай: якобианы и VJP
+
+На практике сети работают с тензорами. Если $\mathbf{y} = f(\mathbf{x})$, где $\mathbf{x} \in \mathbb{R}^n$, $\mathbf{y} \in \mathbb{R}^m$, то локальный градиент — это **матрица Якоби**:
+
+$$
+J = \frac{\partial \mathbf{y}}{\partial \mathbf{x}} \in \mathbb{R}^{m \times n}, \quad J_{ij} = \frac{\partial y_i}{\partial x_j}
+$$
+
+Цепное правило для векторных функций:
+
+$$
+\frac{\partial L}{\partial \mathbf{x}} = J^T \cdot \frac{\partial L}{\partial \mathbf{y}}
+$$
+
+Это **Vector-Jacobian Product (VJP)** — ключевая операция обратного прохода. Важно: $L$ всегда скаляр, поэтому $\frac{\partial L}{\partial \mathbf{y}} \in \mathbb{R}^m$ — это вектор той же размерности, что и $\mathbf{y}$.
+
+::: {.callout-warning title="Почему мы не строим якобиан явно"}
+Для слоя с 1000 входами и 1000 выходами якобиан имеет $10^6$ элементов. Для слоя с $10^4 \times 10^4$ это $10^8$ float32 = 400 МБ только для одного слоя! Вместо этого autograd вычисляет $J^T \mathbf{v}$ (VJP) напрямую, используя структуру операции. Например, для `matmul` $\mathbf{y} = W\mathbf{x}$: якобиан равен $W$, а VJP — это просто $W^T \mathbf{v}$, то есть одно матричное умножение.
 :::
 
-## 3. Реализация autograd: класс Value (scalar autograd)
+### 3.4 Локальные градиенты основных операций
 
-Для понимания магии под капотом PyTorch, полезно написать свой autograd с нуля. В духе библиотеки `micrograd` от Andrej Karpathy, мы можем определить класс `Value`, который оборачивает скалярное число и помнит свою историю (из каких других `Value` он был получен).
+| Операция | Прямой проход | Локальный градиент (VJP) |
+|---|---|---|
+| $z = x + y$ | $z = x + y$ | $\frac{\partial L}{\partial x} += \mathbf{v}$, $\frac{\partial L}{\partial y} += \mathbf{v}$ |
+| $z = x \cdot y$ (поэл.) | $z = x \odot y$ | $\frac{\partial L}{\partial x} += \mathbf{v} \odot y$, $\frac{\partial L}{\partial y} += \mathbf{v} \odot x$ |
+| $z = W\mathbf{x}$ | $z = W\mathbf{x}$ | $\frac{\partial L}{\partial W} += \mathbf{v}\mathbf{x}^T$, $\frac{\partial L}{\partial \mathbf{x}} += W^T\mathbf{v}$ |
+| $z = \text{ReLU}(x)$ | $z = \max(0, x)$ | $\frac{\partial L}{\partial x} += \mathbf{v} \odot \mathbf{1}[x > 0]$ |
+| $z = \exp(x)$ | $z = e^x$ | $\frac{\partial L}{\partial x} += \mathbf{v} \odot z$ |
+| $z = \log(x)$ | $z = \ln x$ | $\frac{\partial L}{\partial x} += \mathbf{v} / x$ |
+| $z = \sum_i x_i$ | $z = \text{sum}(x)$ | $\frac{\partial L}{\partial x} += \mathbf{v} \cdot \mathbf{1}$ |
+
+---
+
+## 4. Алгоритм backpropagation
+
+### 4.1 Формальное описание
+
+```
+Алгоритм Backpropagation:
+
+Входные данные: вычислительный граф G, значение потери L
+Выходные данные: градиенты dL/dθ для всех параметров θ
+
+1. Прямой проход:
+   - Выполнить топологическую сортировку узлов G
+   - Вычислить и сохранить значения всех узлов в порядке сортировки
+
+2. Инициализация:
+   - grad[L] = 1.0  (градиент скаляра по себе)
+
+3. Обратный проход:
+   - Для каждого узла v в обратном топологическом порядке:
+     - Для каждого входа u узла v:
+         grad[u] += local_grad(v, u) * grad[v]
+         (применяем VJP операции v по входу u)
+```
+
+Ключевые наблюдения:
+- **Накопление** (`+=`): один узел может быть входом нескольких операций (fan-out). Градиенты от всех путей суммируются.
+- **Топологический порядок**: гарантирует, что когда мы обрабатываем узел $v$, `grad[v]` уже полностью накоплен.
+- **Сохранённые активации**: для вычисления VJP нужны значения прямого прохода (например, для `relu` нужно знать, где $x > 0$).
+
+### 4.2 Визуализация: полная сеть
+
+Рассмотрим однослойный перцептрон с сигмоидой: $\hat{y} = \sigma(Wx + b)$, $L = -y \log \hat{y} - (1-y)\log(1-\hat{y})$.
+
+```
+x ──→ [matmul W] ──→ s ──→ [+b] ──→ z ──→ [sigmoid] ──→ ŷ ──→ [BCE loss] ──→ L
+         ↑                   ↑
+         W                   b
+```
+
+Обратный проход (для мини-батча размера $B$, $x \in \mathbb{R}^{B \times n}$, $W \in \mathbb{R}^{m \times n}$):
+
+1. $\frac{\partial L}{\partial \hat{y}} = \frac{\hat{y} - y}{\hat{y}(1-\hat{y})} \cdot B^{-1}$ (из BCE)
+2. $\frac{\partial L}{\partial z} = \frac{\partial L}{\partial \hat{y}} \cdot \sigma(z)(1 - \sigma(z))$ — за счёт `sigmoid`
+3. $\frac{\partial L}{\partial b} = \sum_{\text{batch}} \frac{\partial L}{\partial z}$ — за счёт `+b`
+4. $\frac{\partial L}{\partial W} = \left(\frac{\partial L}{\partial z}\right)^T x$ — за счёт `matmul`
+5. $\frac{\partial L}{\partial x} = W^T \frac{\partial L}{\partial z}$ — за счёт `matmul`
+
+---
+
+## 5. Реализация mini-autograd на numpy
+
+### 5.1 Класс `Tensor`
+
+Напишем упрощённый autograd с нуля. Это близко к тому, как устроен PyTorch изнутри — только без GPU и без оптимизаций.
 
 ```python
-class Value:
-    def __init__(self, data, _children=(), _op=''):
-        self.data = data
-        self.grad = 0.0
-        self._backward = lambda: None
-        self._prev = set(_children)
-        self._op = _op
+import numpy as np
+from typing import Optional, Set, List, Tuple, Callable
 
-    def __add__(self, other):
-        other = other if isinstance(other, Value) else Value(other)
-        out = Value(self.data + other.data, (self, other), '+')
-        
+
+class Tensor:
+    """Минимальный тензор с поддержкой autograd."""
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        requires_grad: bool = False,
+        _children: Tuple["Tensor", ...] = (),
+        _op: str = "",
+    ):
+        self.data = np.asarray(data, dtype=np.float64)
+        self.requires_grad = requires_grad
+        self.grad: Optional[np.ndarray] = None
+
+        # Функция, которая заполняет .grad входов из .grad этого тензора
+        self._backward: Callable[[], None] = lambda: None
+        self._prev: Set["Tensor"] = set(_children)
+        self._op = _op  # для отладки
+
+    def __repr__(self) -> str:
+        return f"Tensor({self.data}, grad_fn=<{self._op}>)"
+
+    def _accumulate_grad(self, grad: np.ndarray) -> None:
+        """Накапливаем градиент (важно для fan-out узлов)."""
+        if self.grad is None:
+            self.grad = np.zeros_like(self.data)
+        self.grad += grad
+```
+
+### 5.2 Операции с backward
+
+```python
+    def __add__(self, other: "Tensor") -> "Tensor":
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        out = Tensor(
+            self.data + other.data,
+            requires_grad=self.requires_grad or other.requires_grad,
+            _children=(self, other),
+            _op="add",
+        )
+
         def _backward():
-            self.grad += 1.0 * out.grad
-            other.grad += 1.0 * out.grad
+            # df/dx = 1, df/dy = 1
+            # Учитываем broadcasting: суммируем по размноженным осям
+            if self.requires_grad:
+                grad = out.grad
+                # Если self был broadcast, сворачиваем лишние оси
+                while grad.ndim > self.data.ndim:
+                    grad = grad.sum(axis=0)
+                for i, (s, d) in enumerate(zip(self.data.shape, grad.shape)):
+                    if s == 1 and d > 1:
+                        grad = grad.sum(axis=i, keepdims=True)
+                self._accumulate_grad(grad)
+            if other.requires_grad:
+                grad = out.grad
+                while grad.ndim > other.data.ndim:
+                    grad = grad.sum(axis=0)
+                for i, (s, d) in enumerate(zip(other.data.shape, grad.shape)):
+                    if s == 1 and d > 1:
+                        grad = grad.sum(axis=i, keepdims=True)
+                other._accumulate_grad(grad)
+
+        out._backward = _backward
+        return out
+
+    def __mul__(self, other: "Tensor") -> "Tensor":
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        out = Tensor(
+            self.data * other.data,
+            requires_grad=self.requires_grad or other.requires_grad,
+            _children=(self, other),
+            _op="mul",
+        )
+
+        def _backward():
+            if self.requires_grad:
+                self._accumulate_grad(other.data * out.grad)
+            if other.requires_grad:
+                other._accumulate_grad(self.data * out.grad)
+
+        out._backward = _backward
+        return out
+
+    def matmul(self, other: "Tensor") -> "Tensor":
+        """Матричное умножение: self @ other."""
+        out = Tensor(
+            self.data @ other.data,
+            requires_grad=self.requires_grad or other.requires_grad,
+            _children=(self, other),
+            _op="matmul",
+        )
+
+        def _backward():
+            # dL/dA = dL/dC @ B^T,  dL/dB = A^T @ dL/dC
+            if self.requires_grad:
+                self._accumulate_grad(out.grad @ other.data.T)
+            if other.requires_grad:
+                other._accumulate_grad(self.data.T @ out.grad)
+
+        out._backward = _backward
+        return out
+
+    def relu(self) -> "Tensor":
+        out = Tensor(
+            np.maximum(0, self.data),
+            requires_grad=self.requires_grad,
+            _children=(self,),
+            _op="relu",
+        )
+
+        def _backward():
+            if self.requires_grad:
+                self._accumulate_grad(out.grad * (self.data > 0))
+
+        out._backward = _backward
+        return out
+
+    def exp(self) -> "Tensor":
+        out = Tensor(
+            np.exp(self.data),
+            requires_grad=self.requires_grad,
+            _children=(self,),
+            _op="exp",
+        )
+
+        def _backward():
+            # d(exp(x))/dx = exp(x) = out.data
+            if self.requires_grad:
+                self._accumulate_grad(out.grad * out.data)
+
+        out._backward = _backward
+        return out
+
+    def log(self) -> "Tensor":
+        out = Tensor(
+            np.log(self.data + 1e-8),  # +eps для стабильности
+            requires_grad=self.requires_grad,
+            _children=(self,),
+            _op="log",
+        )
+
+        def _backward():
+            if self.requires_grad:
+                self._accumulate_grad(out.grad / (self.data + 1e-8))
+
+        out._backward = _backward
+        return out
+
+    def sum(self) -> "Tensor":
+        out = Tensor(
+            np.array(self.data.sum()),
+            requires_grad=self.requires_grad,
+            _children=(self,),
+            _op="sum",
+        )
+
+        def _backward():
+            if self.requires_grad:
+                # Градиент скаляра размазывается на все элементы
+                self._accumulate_grad(out.grad * np.ones_like(self.data))
+
         out._backward = _backward
         return out
 ```
 
-Каждая операция определяет:
-1. Как вычислить результат (`self.data + other.data`).
-2. Как пробросить градиент назад (`_backward` closure), умножив приходящий градиент `out.grad` на локальную производную (для сложения она равна $1$).
+### 5.3 Метод `backward()`
 
-## 4. Векторизованный autograd и якобианы
+```python
+    def backward(self) -> None:
+        """Запускаем обратный проход от этого узла (должен быть скаляром)."""
+        assert self.data.ndim == 0, "backward() только для скаляров"
 
-На практике сети работают с многомерными массивами (тензорами), а не со скалярами. Если $\mathbf{y} = f(\mathbf{x})$, где $\mathbf{x} \in \mathbb{R}^n$, $\mathbf{y} \in \mathbb{R}^m$, то локальный градиент — это матрица Якоби $J \in \mathbb{R}^{m \times n}$:
-$$
-J_{ij} = \frac{\partial y_i}{\partial x_j}
-$$
+        # Топологическая сортировка (DFS)
+        topo: List["Tensor"] = []
+        visited: Set[int] = set()
 
-**Почему мы не строим матрицы Якоби явно?**
-Для слоя с $10^3$ входами и $10^3$ выходами матрица Якоби имеет размер $10^6$. В глубоком обучении $L$ всегда скаляр. По цепному правилу нас интересует только векторно-якобианское произведение (Vector-Jacobian Product, VJP):
-$$
-\left(\frac{\partial L}{\partial \mathbf{x}}\right)^T = \left(\frac{\partial L}{\partial \mathbf{y}}\right)^T J
-$$
-Вектор $\frac{\partial L}{\partial \mathbf{y}}$ (размера $m$) умножается на неявно заданную матрицу $J$, давая вектор размера $n$. Это вычисляется эффективно без выделения памяти под $m \times n$ элементов.
+        def build_topo(node: "Tensor") -> None:
+            if id(node) not in visited:
+                visited.add(id(node))
+                for child in node._prev:
+                    build_topo(child)
+                topo.append(node)
 
-## 5. Внутренности PyTorch autograd
+        build_topo(self)
 
-В PyTorch концепция вычислительного графа реализована очень похоже, но на уровне тензоров:
-- **`requires_grad=True`**: говорит PyTorch отслеживать операции над тензором.
-- **Leaf tensors**: тензоры, созданные пользователем (например, веса `nn.Linear`), а не полученные в результате операций. У них `is_leaf=True`. PyTorch накапливает градиенты только в `.grad` для листовых тензоров по умолчанию.
-- **`retain_graph=True`**: обычно после `.backward()` граф уничтожается для экономии памяти. Если нужно сделать `.backward()` дважды, требуется этот флаг.
-- **`torch.no_grad()`**: контекст-менеджер, который отключает построение графа, сильно экономя память во время inference.
+        # Инициализируем градиент корня = 1
+        self.grad = np.ones(())
 
-## 6. Подводные камни
+        # Идём в обратном топологическом порядке
+        for node in reversed(topo):
+            node._backward()
+```
 
-При работе с градиентами легко допустить ошибку:
-1. **Accumulation vs Zeroing**: В PyTorch градиенты в `.grad` суммируются (аккумулируются) при каждом `.backward()`. Это удобно для gradient accumulation на больших батчах, но требует явного `optimizer.zero_grad()` перед каждым шагом, иначе градиенты с прошлых батчей испортят шаг.
-2. **In-place операции**: Операции вида `x += 1` или `x.relu_()` модифицируют память напрямую. Autograd может выбросить ошибку `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`, так как для `.backward()` могут быть нужны старые значения.
+### 5.4 Пример: обучение линейного классификатора
 
-## 7. Затухающие и взрывающиеся градиенты (Vanishing / Exploding)
+```python
+import numpy as np
 
-В глубоких сетях, из-за многократного умножения на веса и производные активаций, градиент может либо стремиться к нулю (vanishing), либо к бесконечности (exploding).
+# Данные: XOR-задача
+X_np = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=float)
+y_np = np.array([[0], [1], [1], [0]], dtype=float)
 
-- **Интуиция**: Если локальные градиенты $\frac{\partial y}{\partial x}$ систематически $< 1$, их произведение по 50 слоям даст $0$. Если $> 1$ — бесконечность.
-- **Борьба с vanishing**: Грамотная инициализация (He/Xavier), правильные активации (ReLU не затухает при $x>0$), skip-connections (Residual, модуль 04).
-- **Борьба с exploding**: **Gradient clipping** — ограничение максимальной нормы градиента перед шагом оптимизатора (`torch.nn.utils.clip_grad_norm_`). Очень полезно отслеживать (мониторить) норму градиентов в логах обучения (gradient norm monitoring).
+# Параметры
+np.random.seed(42)
+W1 = Tensor(np.random.randn(2, 4) * 0.1, requires_grad=True)
+b1 = Tensor(np.zeros((1, 4)), requires_grad=True)
+W2 = Tensor(np.random.randn(4, 1) * 0.1, requires_grad=True)
+b2 = Tensor(np.zeros((1, 1)), requires_grad=True)
 
-## 8. Что делать дальше
+X = Tensor(X_np)
+y = Tensor(y_np)
 
-::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/01-backprop/basic.html) / [advanced](../../seminars/01-backprop/advanced.html)): Построим scalar Value autograd с нуля и обучим MLP на XOR. В продвинутой версии реализуем поддержку мини-батчей.
-- **ДЗ**: [01-backprop](../../homework/01-backprop/README.qmd) — реализовать mini-autograd engine с нуля и натренировать на нём классификатор.
+lr = 0.1
+
+for step in range(200):
+    # Forward pass
+    h = Tensor(X_np).matmul(W1) + b1   # [4, 4]
+    h = h.relu()                         # [4, 4]
+    logits = h.matmul(W2) + b2          # [4, 1]
+    # Sigmoid через exp
+    neg_logits = Tensor(-logits.data, requires_grad=False)
+    probs_inv = Tensor(np.ones_like(logits.data)) + neg_logits.exp()
+    # Упрощение: считаем BCE напрямую
+    # BCE = -y*log(p) - (1-y)*log(1-p)
+    p = logits.exp()  # для демонстрации — не настоящий sigmoid
+    loss = ((logits - y) * (logits - y)).sum()  # MSE для простоты
+
+    # Сброс градиентов
+    for param in [W1, b1, W2, b2]:
+        param.grad = None
+
+    # Backward pass
+    loss.backward()
+
+    # Gradient descent step
+    for param in [W1, b1, W2, b2]:
+        if param.grad is not None:
+            param.data -= lr * param.grad
+
+    if step % 50 == 0:
+        print(f"Step {step}: loss = {loss.data:.4f}")
+```
+
+::: {.callout-tip title="micrograd Андрея Карпати"}
+Самый известный учебный autograd — это [`micrograd`](https://github.com/karpathy/micrograd) [@karpathy2020micrograd]. Он реализует скалярный autograd в ~100 строк и обучает MLP. Наш `Tensor` выше — тензорная версия той же идеи.
 :::
+
+---
+
+## 6. Режимы дифференцирования: forward vs reverse mode
+
+### 6.1 Forward-mode (прямой режим)
+
+В прямом режиме мы одновременно с вычислением $f(x)$ вычисляем **tangent** — производную по одной входной переменной $\dot{x}$ (seed vector):
+
+$$
+\dot{y} = J \cdot \dot{x}
+$$
+
+Это **Jacobian-Vector Product (JVP)**. Одним прямым проходом получаем один столбец якобиана. Чтобы получить весь якобиан $J \in \mathbb{R}^{m \times n}$, нужно $n$ прямых проходов.
+
+**Когда использовать**: когда $n \ll m$, то есть мало входов, много выходов. Редкий случай в DL, но актуален для физических симуляторов и sensitivity analysis.
+
+### 6.2 Reverse-mode (обратный режим) = backpropagation
+
+В обратном режиме одним проходом вычисляем **adjoint** — производную одного выходного значения по всем входам:
+
+$$
+\bar{x} = J^T \cdot \bar{y}
+$$
+
+Это **VJP**. Один обратный проход по всему графу даёт $\nabla_\theta L$ — градиент скаляра $L$ по всем $P$ параметрам.
+
+**Когда использовать**: когда $m \ll n$, то есть один скалярный выход (функция потерь), много входов (параметров). Это стандартный случай в DL.
+
+### 6.3 Сравнение
+
+| Свойство | Forward mode | Reverse mode |
+|---|---|---|
+| Вычисляет | $J \mathbf{v}$ (JVP) | $J^T \mathbf{v}$ (VJP) |
+| Число проходов | $n$ для полного $J$ | $m$ для полного $J$ |
+| Эффективен когда | $n \ll m$ (мало входов) | $m \ll n$ (мало выходов) |
+| В DL | редко | всегда (backprop) |
+| Дополнительная память | $O(1)$ | $O(\text{глубина} \times \text{активации})$ |
+
+::: {.callout-note title="Forward mode в PyTorch"}
+PyTorch поддерживает forward mode с PyTorch 1.11: `torch.func.jvp()`. Он используется для вычисления гессианов эффективным способом: `jvp(vjp(...))`. В обычном обучении вы его не встретите, но он важен для second-order методов и физических симуляций.
+:::
+
+---
+
+## 7. Численное дифференцирование: отладка градиентов
+
+### 7.1 Finite differences
+
+Конечные разности — золотой стандарт для проверки правильности реализации backward. Центральные разности второго порядка:
+
+$$
+\frac{\partial L}{\partial \theta_i} \approx \frac{L(\theta + \epsilon \mathbf{e}_i) - L(\theta - \epsilon \mathbf{e}_i)}{2\epsilon} + O(\epsilon^2)
+$$
+
+Ошибка аппроксимации убывает как $\epsilon^2$ (лучше, чем у односторонних разностей с $O(\epsilon)$).
+
+### 7.2 Gradient check
+
+```python
+def gradient_check(
+    loss_fn,
+    params: list,
+    eps: float = 1e-5,
+    rtol: float = 1e-3,
+) -> None:
+    """
+    Проверяем, совпадают ли аналитические градиенты с численными.
+    params: список Tensor с requires_grad=True
+    """
+    # Аналитические градиенты
+    loss = loss_fn()
+    loss.backward()
+    analytic_grads = [p.grad.copy() for p in params]
+
+    # Сброс
+    for p in params:
+        p.grad = None
+
+    # Численные градиенты
+    numeric_grads = []
+    for p in params:
+        num_grad = np.zeros_like(p.data)
+        it = np.nditer(p.data, flags=["multi_index"])
+        while not it.finished:
+            idx = it.multi_index
+            old_val = p.data[idx]
+
+            p.data[idx] = old_val + eps
+            loss_plus = loss_fn().data
+
+            p.data[idx] = old_val - eps
+            loss_minus = loss_fn().data
+
+            p.data[idx] = old_val
+            num_grad[idx] = (loss_plus - loss_minus) / (2 * eps)
+            it.iternext()
+        numeric_grads.append(num_grad)
+
+    # Сравнение
+    for i, (ag, ng) in enumerate(zip(analytic_grads, numeric_grads)):
+        rel_err = np.abs(ag - ng) / (np.abs(ag) + np.abs(ng) + 1e-8)
+        max_err = rel_err.max()
+        status = "OK" if max_err < rtol else "FAIL"
+        print(f"  param[{i}]: max_rel_err = {max_err:.2e} [{status}]")
+
+
+# Использование:
+# gradient_check(lambda: compute_loss(X, y, W, b), [W, b])
+```
+
+### 7.3 Ограничения численного градиента
+
+- **Медленно**: $O(2P)$ вызовов loss при $P$ параметрах. Для проверки берите небольшие тензоры.
+- **Численные ошибки**: выбор $\epsilon$ — компромисс. При float32 оптимально $\epsilon \approx 10^{-4}$, при float64 — $\epsilon \approx 10^{-6}$.
+- **Недетерминизм**: если в модели есть Dropout или другой рандом, gradient check сломается. Фиксируйте seed.
+- **Не для продакшна**: используйте только для отладки, не в цикле обучения.
+
+---
+
+## 8. Autograd в PyTorch
+
+### 8.1 Базовые концепции
+
+```python
+import torch
+
+# requires_grad=True: PyTorch начинает строить граф
+x = torch.tensor([2.0, 3.0], requires_grad=True)
+y = torch.tensor([4.0, 5.0], requires_grad=True)
+
+# Вычисляем выражение
+z = (x * y).sum()  # скаляр
+
+# Запускаем backprop
+z.backward()
+
+print(x.grad)  # tensor([4., 5.]) — градиент по x = y
+print(y.grad)  # tensor([2., 3.]) — градиент по y = x
+```
+
+**Leaf tensors** — это тензоры, которые не являются результатом операции (созданы пользователем). Градиент сохраняется только для leaf тензоров с `requires_grad=True`.
+
+```python
+# is_leaf: True для x, False для промежуточных результатов
+a = torch.randn(3, requires_grad=True)   # leaf: True
+b = a * 2                                 # leaf: False (это результат операции)
+print(a.is_leaf)  # True
+print(b.is_leaf)  # False
+```
+
+### 8.2 `retain_graph` и многократный backward
+
+По умолчанию после `.backward()` граф уничтожается (буферы активаций освобождаются):
+
+```python
+x = torch.randn(3, requires_grad=True)
+y = (x ** 2).sum()
+
+y.backward()   # OK
+# y.backward() # RuntimeError: Trying to backward through the graph a second time
+
+# Решение: retain_graph=True
+y = (x ** 2).sum()
+y.backward(retain_graph=True)  # граф сохраняется
+y.backward()                    # OK — второй backward по тому же графу
+```
+
+Когда это нужно: GANs (отдельные backward для G и D через общие вычисления), multi-task learning с общим backbone, MAML.
+
+### 8.3 `torch.autograd.grad`
+
+Более низкоуровневый API для вычисления градиентов без `.backward()`:
+
+```python
+import torch
+from torch.autograd import grad
+
+x = torch.randn(4, requires_grad=True)
+y = (x ** 3).sum()
+
+# Градиент y по x
+dy_dx = grad(y, x)[0]
+print(dy_dx)  # 3 * x^2
+
+# Градиент второго порядка (градиент градиента)
+x = torch.randn(4, requires_grad=True)
+y = (x ** 3).sum()
+dy_dx = grad(y, x, create_graph=True)[0]  # create_graph=True для double backward
+d2y_dx2 = grad(dy_dx.sum(), x)[0]
+print(d2y_dx2)  # 6 * x
+```
+
+Параметр `create_graph=True` важен для вычисления производных высшего порядка — PyTorch строит граф над графом.
+
+### 8.4 Кастомная функция: `torch.autograd.Function`
+
+Иногда нужно написать собственную операцию с явно заданным backward — например, для операций с недифференцируемыми шагами (квантование, argmax) или для численно стабильной реализации:
+
+```python
+import torch
+from torch.autograd import Function
+
+
+class MySigmoid(Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        # ctx — объект для сохранения данных между forward и backward
+        s = 1.0 / (1.0 + torch.exp(-x))
+        ctx.save_for_backward(s)  # сохраняем выход (нужен для backward)
+        return s
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        # grad_output: dL/d(output) — то, что пришло сверху
+        (s,) = ctx.saved_tensors
+        # Производная sigmoid: s * (1 - s)
+        grad_input = grad_output * s * (1.0 - s)
+        return grad_input  # количество возвратов = количеству аргументов forward (кроме ctx)
+
+
+# Использование
+x = torch.randn(5, requires_grad=True)
+y = MySigmoid.apply(x)  # не MySigmoid(x)!
+loss = y.sum()
+loss.backward()
+print(x.grad)
+```
+
+::: {.callout-tip title="Numerically stable log-softmax"}
+Именно так реализован `F.log_softmax` в PyTorch — кастомный backward, который вычисляет градиент аналитически вместо того, чтобы дифференцировать через `exp()` и `log()` по отдельности. Это даёт численную стабильность и экономит память.
+:::
+
+### 8.5 `torch.no_grad()` и `detach()`
+
+```python
+model = MyModel()
+x = torch.randn(32, 10)
+
+# Inference без построения графа — экономит память и ускоряет
+with torch.no_grad():
+    out = model(x)
+
+# detach(): отрывает тензор от графа, но данные остаются
+# Применение: заморозить часть модели, target networks в RL
+target = model(x).detach()  # не распространяем градиент через target
+```
+
+---
+
+## 9. Подводные камни autograd
+
+### 9.1 In-place операции
+
+In-place операции изменяют данные тензора "на месте" и могут нарушить backward, если PyTorch уже сохранил ссылку на старые данные:
+
+```python
+x = torch.randn(3, requires_grad=True)
+y = x * 2
+
+# ПЛОХО: in-place изменяет x, который нужен для backward y
+# x += 1  # RuntimeError!
+
+# ХОРОШО: создаём новый тензор
+x_new = x + 1
+```
+
+Типичные in-place операции: `+=`, `-=`, `*=`, `relu_()`, `fill_()`, `zero_()`. Используйте их только для параметров после шага оптимизатора (optimizer их обрабатывает правильно).
+
+### 9.2 Accumulation gradients — не забывайте `zero_grad()`
+
+```python
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+for batch in dataloader:
+    optimizer.zero_grad()  # ОБЯЗАТЕЛЬНО сбросить перед backward!
+    loss = criterion(model(batch["x"]), batch["y"])
+    loss.backward()        # градиенты накапливаются в .grad
+    optimizer.step()       # делаем шаг
+
+# Если забыть zero_grad(), градиенты с предыдущего батча суммируются с текущим.
+# Это иногда делают намеренно (gradient accumulation для больших батчей):
+accumulation_steps = 4
+for i, batch in enumerate(dataloader):
+    loss = criterion(model(batch["x"]), batch["y"]) / accumulation_steps
+    loss.backward()
+    if (i + 1) % accumulation_steps == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### 9.3 Double backward и `create_graph`
+
+Double backward нужен для:
+- Вычисления гессиана (second-order методы)
+- MAML (meta-learning)
+- Gradient penalty (WGAN-GP)
+
+```python
+x = torch.randn(4, requires_grad=True)
+y = (x ** 3).sum()
+
+# Первый backward с create_graph=True строит граф для grad
+dy_dx = torch.autograd.grad(y, x, create_graph=True)[0]
+
+# Второй backward по графу градиентов
+d2y_dx2 = torch.autograd.grad(dy_dx.sum(), x)[0]
+# Результат: 6 * x (аналитически верно для x^3)
+```
+
+Важно: `create_graph=True` существенно увеличивает потребление памяти.
+
+### 9.4 Gradient clipping
+
+Обрезание градиентов — необходимость при обучении рекуррентных сетей и трансформеров (взрывающиеся градиенты):
+
+```python
+optimizer.zero_grad()
+loss.backward()
+
+# Clip by global norm: масштабирует весь вектор градиентов
+# чтобы его L2-норма не превышала max_norm
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+optimizer.step()
+
+# Полезно: мониторим норму градиентов
+total_norm = 0.0
+for p in model.parameters():
+    if p.grad is not None:
+        param_norm = p.grad.data.norm(2)
+        total_norm += param_norm.item() ** 2
+total_norm = total_norm ** 0.5
+print(f"Gradient norm: {total_norm:.4f}")
+```
+
+::: {.callout-warning title="Gradient clipping — не панацея"}
+Если норма градиентов нарастает без клиппинга, это сигнал проблемы с архитектурой или LR. Клиппинг — пластырь, а не решение. Мониторьте `grad_norm` в ваших логах (W&B, TensorBoard).
+:::
+
+### 9.5 Detach и остановка градиентов
+
+```python
+# Target network в DRL (Double DQN, SAC): веса target не обновляются
+# через backprop от Q-loss
+with torch.no_grad():
+    target_q = target_network(next_obs)  # нет градиентов
+
+# Альтернатива: stop-gradient для конкретного тензора
+target_q = online_network(next_obs).detach()
+
+# Gradient reversal layer (Domain Adaptation):
+# Передаём -grad вместо +grad
+class GradReverse(Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        return -ctx.alpha * grad, None
+
+reversed_features = GradReverse.apply(features, alpha=0.1)
+```
+
+---
+
+## 10. Связь с оптимизацией
+
+### 10.1 Стохастический градиентный спуск (SGD)
+
+Чистый SGD использует градиент по мини-батчу:
+
+$$
+\theta_{t+1} = \theta_t - \eta \nabla_\theta L_{\text{batch}}(\theta_t)
+$$
+
+```python
+# PyTorch реализация "вручную"
+for param in model.parameters():
+    if param.grad is not None:
+        param.data -= lr * param.grad
+```
+
+### 10.2 SGD с моментумом
+
+Момент "помнит" направление предыдущих шагов — уменьшает осцилляции и ускоряет сходимость:
+
+$$
+v_{t+1} = \mu v_t + \nabla_\theta L(\theta_t)
+$$
+$$
+\theta_{t+1} = \theta_t - \eta v_{t+1}
+$$
+
+```python
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+```
+
+### 10.3 Adam
+
+Adam [@kingma2014adam] — адаптивный оптимизатор, наиболее популярный в DL:
+
+$$
+m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t \quad \text{(первый момент, momentum)}
+$$
+$$
+v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 \quad \text{(второй момент, RMS)}
+$$
+$$
+\hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t} \quad \text{(bias correction)}
+$$
+$$
+\theta_{t+1} = \theta_t - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon} \hat{m}_t
+$$
+
+Дефолтные гиперпараметры: $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$, $\eta = 10^{-3}$.
+
+```python
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999))
+```
+
+Все три оптимизатора используют градиенты $g_t = \nabla_\theta L$, получаемые через backprop. Разница только в том, как именно эти градиенты преобразуются в шаг по параметрам.
+
+::: {.callout-note title="Почему оптимизаторы не трогают граф"}
+Шаг оптимизатора (`optimizer.step()`) — это чистая математика по значениям `.data` и `.grad` без каких-либо операций autograd. Граф вычислений существует только для вычисления `.grad`, после чего он не нужен.
+:::
+
+---
+
+## 11. Итоговая картина
+
+Цикл обучения нейронной сети с точки зрения autograd:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Цикл обучения (Training loop)                               │
+│                                                             │
+│  1. optimizer.zero_grad()     ← сброс .grad у параметров   │
+│                                                             │
+│  2. output = model(batch_x)   ← Forward pass:              │
+│                                  строится DAG операций      │
+│                                                             │
+│  3. loss = criterion(output,  ← добавляем loss-узел в граф  │
+│              batch_y)                                       │
+│                                                             │
+│  4. loss.backward()           ← Backward pass:             │
+│                                  VJP по всему графу,        │
+│                                  накапливаем .grad          │
+│                                                             │
+│  5. clip_grad_norm_(...)      ← Опционально                 │
+│                                                             │
+│  6. optimizer.step()          ← Шаг по параметрам,         │
+│                                  использует .grad           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Ключевые тезисы для запоминания
 
 ::: {.callout-important title="Минимум на запоминание"}
-1. Autograd строит направленный ациклический граф операций и применяет цепное правило (chain rule) в обратном порядке.
-2. Локальные градиенты умножаются на глобальный градиент (пришедший сверху), образуя Vector-Jacobian Product (VJP). Явные матрицы Якоби не строятся.
-3. В PyTorch градиенты накапливаются, поэтому всегда нужно делать `zero_grad()`.
-4. Для листовых тензоров (весов) PyTorch сохраняет градиент в `.grad`, а промежуточные буферы уничтожает после `.backward()`.
+1. **Autograd = chain rule + DAG.** Вычислительный граф + обход в обратном топологическом порядке с умножением VJP.
+
+2. **VJP, не якобиан.** Мы никогда не строим матрицу $J$ явно. Backprop вычисляет $J^T \mathbf{v}$ за одно обратное прохождение по графу.
+
+3. **Reverse mode эффективен для $m \ll n$.** В DL всегда $m = 1$ (скалярный loss) и $n = P$ (миллиарды параметров). Поэтому backprop работает.
+
+4. **Градиенты накапливаются.** В PyTorch `.grad` не перезаписывается, а суммируется. Всегда вызывайте `zero_grad()`.
+
+5. **Граф уничтожается после backward.** По умолчанию буферы активаций освобождаются. `retain_graph=True` нужен для повторного backward.
+
+6. **In-place операции опасны.** Могут нарушить вычисление градиентов. Используйте осторожно.
+
+7. **Численные градиенты — для отладки.** Gradient check позволяет убедиться в корректности custom backward, но медленен для регулярного использования.
 :::
 
-## Литература {.appendix}
+---
+
+## Модуль в курсе
+
+::: {.callout-tip title="Семинар и домашнее задание"}
+- **Семинар** ([basic](../../seminars/01-backprop/basic.html) / [advanced](../../seminars/01-backprop/advanced.html)):
+  - *Basic*: реализуем scalar `Value` autograd, обучаем MLP на XOR, визуализируем граф.
+  - *Advanced*: добавляем тензорный `Tensor`, реализуем softmax + cross-entropy с numerically stable backward, обучаем на MNIST.
+- **ДЗ** ([01-backprop](../../homework/01-backprop/README.qmd)):
+  - Реализовать mini-autograd engine с поддержкой `add`, `mul`, `matmul`, `relu`, `log`, `exp`.
+  - Пройти gradient check для каждой операции.
+  - Обучить двухслойный MLP на задаче классификации.
+  - *Бонус*: реализовать `conv2d` с backward через im2col.
+:::
+
+---
+
+## Литература
 
 ::: {#refs}
 :::

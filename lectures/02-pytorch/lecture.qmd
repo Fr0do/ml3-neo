@@ -1,12 +1,14 @@
 ---
-title: "Лекция 02 — PyTorch Fundamentals"
-subtitle: "Тензоры, графы вычислений и цикл обучения"
+title: "Лекция 02 — PyTorch Fundamentals & Modern Training Stack"
+subtitle: "Тензоры, autograd, nn.Module, torch.compile и всё остальное"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
 format:
   html:
     code-fold: false
+    toc: true
+    toc-depth: 3
   pdf:
     include-in-header:
       - text: |
@@ -14,105 +16,1150 @@ format:
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Мы переходим от теории (backpropagation, полносвязные сети) к практике. PyTorch — это основной фреймворк, который мы будем использовать до конца курса.
+Прошлая лекция: backpropagation вручную, цепное правило на бумаге. Сегодня: как всё это реализовано в PyTorch 2.x и как правильно строить современный training pipeline — от тензоров до `torch.compile` и распределённого обучения.
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/02-pytorch/basic.html){.active} · [advanced](../../seminars/02-pytorch/advanced.html)
 :::
 
-## 1. Мотивация
+---
 
-Написание нейросетей на чистом NumPy (или C++) — это отличный способ понять основы, но ужасный способ делать исследования или разрабатывать продукты. Нам нужен инструмент, который автоматически считает градиенты (autodiff) и эффективно исполняет тензорные операции на GPU. PyTorch решает обе эти задачи, оставаясь при этом максимально "pythonic".
+## 1. Экосистема PyTorch 2.x
 
-## 2. Ключевая идея
+PyTorch начался в 2016 году как альтернатива Theano/Caffe с режимом eager execution — операции выполняются немедленно, как в обычном Python. Это упростило отладку, но ценой производительности: нельзя оптимизировать граф целиком. В PyTorch 2.0 (2023) появился принципиально новый компонент — **компиляция графов** при сохранении привычного интерфейса [@paszke2019pytorch].
 
-PyTorch можно представить как NumPy на стероидах с одной важной добавкой: каждый тензор помнит, как он был создан, формируя **вычислительный граф**.
+### 1.1 Архитектурный стек PyTorch 2.x
 
-::: {.callout-tip title="Где это в DL_BOOK"}
-Глава 6.5 (Back-Propagation and Other Differentiation Algorithms), стр. 200.
-:::
-
-## 3. Детали и подводные камни
-
-### Tensor как ndarray + граф
-
-Тензор в PyTorch (`torch.Tensor`) очень похож на `numpy.ndarray`. Под капотом он хранит одномерный массив данных в памяти (`storage`) и информацию о том, как этот массив интерпретировать (`strides`, `shape`).
-
-Некоторые операции (например, `transpose`, `view`) не копируют данные, а создают новый "вид" (view) с другими `strides`. Это быстро, но иногда приводит к тому, что тензор перестает быть непрерывным в памяти (`contiguous`). Вызов `.contiguous()` переупаковывает данные, если это необходимо.
-
-### Autograd: автоматическое дифференцирование
-
-Когда вы создаете тензор с `requires_grad=True`, PyTorch начинает отслеживать все операции над ним. 
-- `leaf tensors`: тензоры, созданные пользователем (например, веса модели).
-- `grad_fn`: ссылка на функцию, которая создала тензор (для узлов графа).
-- `backward()`: обходит граф от корня к листьям по правилу цепочки (chain rule), накапливая градиенты в атрибуте `.grad` листовых тензоров.
-- `detach()`: отрывает тензор от вычислительного графа (например, для сохранения метрик).
-
-### nn.Module
-
-Все слои и нейросети в PyTorch наследуются от `torch.nn.Module`.
-- `forward(self, x)`: определяет прямой проход.
-- `parameters()`: возвращает все обучаемые параметры (и параметры `submodules`).
-- `state_dict()`: словарь со всеми весами, используется для сохранения и загрузки моделей.
-
-### Оптимизаторы
-
-PyTorch предоставляет реализации градиентных методов в `torch.optim`:
-- **SGD** (с momentum).
-- **Adam**: адаптивный шаг обучения (использует оценки первого и второго моментов градиента).
-- **AdamW**: правильная реализация weight decay (в отличие от L2 регуляризации, они не эквивалентны при адаптивном шаге).
-
-### DataLoader
-
-Для обучения сетям нужны данные батчами.
-- `Dataset`: абстрактный класс, требует реализации `__len__` и `__getitem__`.
-- `DataLoader`: оборачивает Dataset, обеспечивает многопроцессорную загрузку (`num_workers`), объединение сэмплов в батч (`collate_fn`) и закрепление памяти для быстрой передачи на GPU (`pin_memory`).
-
-### Цикл обучения (Training Loop)
-
-Стандартный цикл обучения выглядит так:
-1. Перевод модели в `train()` mode (важно для Dropout / BatchNorm).
-2. Загрузка батча.
-3. Прямой проход (forward).
-4. Вычисление потерь (loss).
-5. Очистка градиентов: `optimizer.zero_grad()`.
-6. Обратный проход: `loss.backward()`.
-7. Шаг оптимизатора: `optimizer.step()`.
-
-**Продвинутые техники:**
-- **Gradient Accumulation**: если батч не влезает в память, делаем `.step()` раз в $N$ итераций.
-- **AMP (Automatic Mixed Precision)**: использование `torch.cuda.amp.autocast` и `GradScaler` для вычислений в float16 (ускорение до 2x без потери качества).
-
-### Debugging PyTorch
-
-- Проверка на NaN: `torch.isnan(tensor).any()`.
-- Нормы градиентов: полезно логировать норму градиентов для отлова взрыва/затухания градиентов.
-- `torch.autograd.set_detect_anomaly(True)`: замедляет вычисления, но точно указывает операцию, где появился NaN или inplace-модификация.
-
-### Быстрый старт на GPU
-
-Всегда пишите device-agnostic code:
-```python
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-batch_x = batch_x.to(device)
+```
+Ваш Python/PyTorch код
+        │
+        ▼
+  TorchDynamo          ← bytecode-level граф-каптура
+        │
+        ▼
+  FX Graph (ATen IR)   ← промежуточное представление
+        │
+        ▼
+  TorchInductor        ← backend-компилятор
+        │
+        ▼
+  Triton / C++ / CUDA  ← финальный kernel-код
 ```
 
-## 4. Что делать дальше
+**TorchDynamo** — это JIT-компилятор на уровне байт-кода Python. Он перехватывает выполнение, строит граф из тензорных операций и передаёт его в backend. Ключевое свойство: при встрече с Python-конструкциями, которые не поддаются компиляции (условные переходы, вызовы внешних библиотек), Dynamo делает **graph break** — разбивает граф на части, остальное выполняет в eager-режиме.
+
+**TorchInductor** — основной backend-компилятор. Генерирует эффективный Triton-код для GPU и C++/OpenMP для CPU. Умеет объединять (fuse) несколько операций в один kernel, что сокращает количество memory round-trips.
+
+::: {.callout-tip title="Почему это важно для практика"}
+`torch.compile` даёт 20–80% ускорения на типичных задачах **без изменения кода**. На трансформерах с flash attention выигрыш ещё выше. Это не магия: компилятор просто убирает overhead интерпретатора и fusion-оптимизирует операции.
+:::
+
+### 1.2 Первый шаг: что означает torch.compile
+
+```python
+import torch
+import torch.nn as nn
+
+model = nn.TransformerEncoder(
+    nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True),
+    num_layers=6
+)
+
+# Один вызов — и модель скомпилирована
+compiled_model = torch.compile(model)
+
+# Первый вызов — компиляция (может занять 1-3 минуты)
+# Последующие — ускоренное выполнение
+x = torch.randn(32, 128, 512)
+out = compiled_model(x)
+```
+
+---
+
+## 2. Тензоры: всё, что нужно знать
+
+### 2.1 Физическое представление: storage и strides
+
+Тензор в PyTorch — это не просто массив данных. Внутри он состоит из:
+- **Storage** — одномерный непрерывный буфер памяти
+- **shape** — форма тензора (tuple размерностей)
+- **strides** — шаги по каждой оси (сколько элементов пропустить, чтобы сдвинуться на 1 по этой оси)
+- **offset** — смещение начала данных в storage
+
+```python
+import torch
+
+t = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+print(t.shape)    # torch.Size([2, 3, 4])
+print(t.stride()) # (12, 4, 1)  -- C-order (row-major)
+print(t.storage_offset())  # 0
+```
+
+Это означает: элемент `t[i, j, k]` хранится по адресу `offset + i*12 + j*4 + k*1`.
+
+### 2.2 Views и копии
+
+Многие операции возвращают **view** — тензор с другими strides/shape, но разделяющий тот же storage:
+
+```python
+a = torch.randn(4, 6)
+b = a.T            # транспонирование — view
+c = a.view(2, 12)  # reshape — view (если возможно)
+d = a[::2]         # slicing — view
+
+# Проверить, является ли тензор view:
+print(b.is_contiguous())  # False — T меняет strides
+print(b.data_ptr() == a.data_ptr())  # True — тот же storage
+```
+
+::: {.callout-warning title="Опасность non-contiguous тензоров"}
+Некоторые операции требуют contiguous тензор. Если передать non-contiguous, PyTorch тихо сделает копию — это неожиданное выделение памяти. Всегда проверяйте или явно вызывайте `.contiguous()`.
+
+```python
+# Transpose даёт non-contiguous:
+x = torch.randn(3, 4)
+xt = x.T
+print(xt.is_contiguous())  # False
+
+# Исправление:
+xt_c = xt.contiguous()  # создаёт копию с правильным layout
+```
+:::
+
+### 2.3 dtype и device
+
+```python
+# Основные dtypes:
+x_fp32 = torch.randn(3, 4)                         # float32 (default)
+x_fp16 = torch.randn(3, 4, dtype=torch.float16)    # half precision
+x_bf16 = torch.randn(3, 4, dtype=torch.bfloat16)   # brain float (лучше для обучения)
+x_int8 = torch.zeros(3, 4, dtype=torch.int8)       # quantization
+x_bool = torch.zeros(3, 4, dtype=torch.bool)       # маски
+
+# Конвертация:
+x_fp16 = x_fp32.half()       # или .to(torch.float16)
+x_fp32 = x_fp16.float()      # или .to(torch.float32)
+
+# Devices:
+device = torch.device("cuda:0")  # первая GPU
+x_gpu = x_fp32.to(device)
+x_cpu = x_gpu.cpu()
+
+# Полезный паттерн:
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+```
+
+**bfloat16 vs float16:**
+- `float16`: экспонента 5 бит, мантисса 10 бит. Диапазон ограничен — нужен gradient scaler
+- `bfloat16`: экспонента 8 бит (как float32), мантисса 7 бит. Больший диапазон — часто не нужен scaler
+
+### 2.4 Broadcasting: правила и подводные камни
+
+Broadcasting позволяет выполнять операции над тензорами разных форм. Правила выравнивания — **справа налево**:
+
+```
+A: (32, 1, 128)
+B: (     3, 128)
+─────────────────
+R: (32, 3, 128)   ← автоматически расширяется
+```
+
+```python
+# Пример: добавить bias к каждому элементу батча
+x = torch.randn(32, 10)  # batch of 32 vectors
+bias = torch.randn(10)   # один bias
+result = x + bias        # broadcasting: (32,10) + (10,) → (32,10)
+
+# Важный подводный камень — непреднамеренный broadcasting:
+a = torch.randn(3, 1)
+b = torch.randn(1, 4)
+c = a + b  # → (3, 4), не ошибка, но может быть неожиданно
+```
+
+::: {.callout-warning title="Broadcasting и memory"}
+Broadcasting **не копирует данные**, пока вы не выполните операцию, требующую реального расширения. Но если вы присвоите результат in-place или сохраните развёрнутую версию — память выделится. Будьте внимательны при работе с большими тензорами.
+:::
+
+### 2.5 Autograd: вычислительный граф
+
+Когда `requires_grad=True`, PyTorch строит граф:
+
+```python
+x = torch.tensor([2.0], requires_grad=True)
+w = torch.tensor([3.0], requires_grad=True)
+b = torch.tensor([1.0], requires_grad=True)
+
+y = w * x + b           # граф: y = 3*2 + 1 = 7
+loss = (y - 5.0) ** 2  # loss = (7-5)^2 = 4
+
+loss.backward()
+
+print(x.grad)   # d(loss)/dx = 2*(y-5)*w = 2*2*3 = 12
+print(w.grad)   # d(loss)/dw = 2*(y-5)*x = 2*2*2 = 8
+print(b.grad)   # d(loss)/db = 2*(y-5)*1 = 2*2*1 = 4
+```
+
+Граф строится **динамически** — при каждом forward pass. Это позволяет использовать обычные Python-конструкции (if, for, рекурсия).
+
+```python
+# После backward граф освобождается (retain_graph=False по умолчанию)
+loss.backward()
+# loss.backward()  # ← ошибка, граф уже уничтожен
+
+# Чтобы считать backward несколько раз:
+loss.backward(retain_graph=True)
+loss.backward()  # теперь ок
+```
+
+**Отключение autograd:**
+
+```python
+# Для инференса — не строить граф вовсе:
+with torch.no_grad():
+    output = model(x)
+
+# Отделить тензор от графа (сохранить значение, отбросить историю):
+loss_value = loss.detach().item()  # обязательно при логировании!
+```
+
+::: {.callout-important title="Частая ошибка: утечка графа"}
+```python
+losses = []
+for batch in dataloader:
+    loss = compute_loss(model, batch)
+    losses.append(loss)          # ← НЕПРАВИЛЬНО: сохраняем tensor с графом
+    losses.append(loss.item())   # ← ПРАВИЛЬНО: сохраняем Python float
+```
+Первый вариант держит в памяти всю историю вычислений каждого батча. На длинных тренировках это съедает всю GPU-память.
+:::
+
+---
+
+## 3. DataLoader и Dataset
+
+### 3.1 Map-style Dataset
+
+```python
+from torch.utils.data import Dataset, DataLoader
+import torch
+
+class MyDataset(Dataset):
+    def __init__(self, data, labels):
+        self.data = data
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        # Может выполняться в worker-процессе
+        x = torch.tensor(self.data[idx], dtype=torch.float32)
+        y = torch.tensor(self.labels[idx], dtype=torch.long)
+        return x, y
+
+dataset = MyDataset(my_data, my_labels)
+loader = DataLoader(
+    dataset,
+    batch_size=64,
+    shuffle=True,
+    num_workers=4,       # параллельная загрузка
+    pin_memory=True,     # закрепить память для быстрой передачи на GPU
+    prefetch_factor=2,   # сколько батчей готовить заранее на worker
+    persistent_workers=True,  # не убивать workers между эпохами
+)
+```
+
+### 3.2 IterableDataset
+
+Для потоковых данных, которые не помещаются в память или приходят из сети:
+
+```python
+from torch.utils.data import IterableDataset
+import math
+
+class StreamingDataset(IterableDataset):
+    def __init__(self, file_paths, world_size=1, rank=0):
+        self.file_paths = file_paths
+        self.world_size = world_size
+        self.rank = rank
+
+    def __iter__(self):
+        # ВАЖНО: разделить данные между workers
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is None:
+            # Single-worker mode
+            files_to_process = self.file_paths
+        else:
+            # Multi-worker: каждый worker берёт своё подмножество
+            per_worker = int(math.ceil(len(self.file_paths) / worker_info.num_workers))
+            start = worker_info.id * per_worker
+            end = min(start + per_worker, len(self.file_paths))
+            files_to_process = self.file_paths[start:end]
+
+        for path in files_to_process:
+            with open(path) as f:
+                for line in f:
+                    yield self.process(line)
+
+    def process(self, line):
+        # парсинг и преобразование
+        return torch.tensor([float(x) for x in line.split()])
+```
+
+### 3.3 collate_fn: кастомная сборка батча
+
+```python
+def collate_variable_length(batch):
+    """Паддинг последовательностей переменной длины."""
+    sequences, labels = zip(*batch)
+
+    # Паддинг до максимальной длины в батче
+    max_len = max(s.shape[0] for s in sequences)
+    padded = torch.zeros(len(sequences), max_len)
+    lengths = torch.zeros(len(sequences), dtype=torch.long)
+
+    for i, seq in enumerate(sequences):
+        padded[i, :len(seq)] = seq
+        lengths[i] = len(seq)
+
+    return padded, torch.stack(labels), lengths
+
+loader = DataLoader(dataset, batch_size=32, collate_fn=collate_variable_length)
+```
+
+::: {.callout-tip title="pin_memory и num_workers"}
+- `pin_memory=True` — выделяет память на CPU в "закреплённой" (non-pageable) области. Передача на GPU становится значительно быстрее (DMA transfer). Работает только с CUDA.
+- `num_workers > 0` — загрузка в отдельных процессах (не потоках!). Для тяжёлых аугментаций данных ставьте `num_workers = 4..8`.
+- `persistent_workers=True` — worker-процессы не умирают между эпохами. Экономит время на их инициализацию, но расходует RAM.
+:::
+
+---
+
+## 4. nn.Module: внутреннее устройство
+
+### 4.1 Параметры и буферы
+
+`nn.Module` — основной строительный блок. Внутри он управляет двумя типами тензоров:
+
+```python
+import torch.nn as nn
+
+class MyModel(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        # nn.Parameter — обучаемые параметры (requires_grad=True)
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        self.bias = nn.Parameter(torch.zeros(out_features))
+
+        # Буфер — не обучается, но сохраняется в state_dict
+        # Например: running statistics в BatchNorm
+        self.register_buffer('running_mean', torch.zeros(out_features))
+        self.register_buffer('running_var', torch.ones(out_features))
+
+    def forward(self, x):
+        return x @ self.weight.T + self.bias
+
+model = MyModel(128, 64)
+
+# Итерация по параметрам:
+for name, param in model.named_parameters():
+    print(f"{name}: {param.shape}, requires_grad={param.requires_grad}")
+
+# Итерация по буферам:
+for name, buf in model.named_buffers():
+    print(f"{name}: {buf.shape}")
+```
+
+### 4.2 Submodules и вложенность
+
+```python
+class Encoder(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, num_heads=8, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x, mask=None):
+        # Pre-norm архитектура
+        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x),
+                                 attn_mask=mask)
+        x = x + self.dropout(attn_out)
+        ffn_out = self.ffn(self.norm2(x))
+        x = x + self.dropout(ffn_out)
+        return x
+
+# model.parameters() рекурсивно обходит все submodules:
+encoder = Encoder(512)
+total_params = sum(p.numel() for p in encoder.parameters())
+trainable_params = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+print(f"Total: {total_params:,}, Trainable: {trainable_params:,}")
+```
+
+### 4.3 Hooks: перехватчики прямого и обратного прохода
+
+Hooks позволяют инспектировать и изменять промежуточные тензоры без изменения кода модели:
+
+```python
+class GradientDebugger:
+    def __init__(self, model):
+        self.hooks = []
+        self.grad_norms = {}
+
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                hook = module.register_full_backward_hook(
+                    self._make_hook(name)
+                )
+                self.hooks.append(hook)
+
+    def _make_hook(self, name):
+        def hook(module, grad_input, grad_output):
+            # grad_output: градиент, пришедший с выхода модуля
+            if grad_output[0] is not None:
+                norm = grad_output[0].norm().item()
+                self.grad_norms[name] = norm
+        return hook
+
+    def remove(self):
+        for h in self.hooks:
+            h.remove()
+
+debugger = GradientDebugger(model)
+loss.backward()
+for name, norm in debugger.grad_norms.items():
+    print(f"{name}: grad norm = {norm:.4f}")
+debugger.remove()  # важно: убрать hooks после использования
+```
+
+**Forward hooks** для извлечения активаций:
+
+```python
+activations = {}
+
+def hook_fn(module, input, output):
+    activations['encoder_out'] = output.detach()
+
+handle = model.encoder.register_forward_hook(hook_fn)
+with torch.no_grad():
+    _ = model(x)
+handle.remove()
+
+print(activations['encoder_out'].shape)
+```
+
+### 4.4 state_dict и load_state_dict
+
+```python
+# Сохранение:
+torch.save(model.state_dict(), 'model.pt')
+
+# Загрузка:
+state_dict = torch.load('model.pt', map_location='cpu')
+model.load_state_dict(state_dict)
+
+# Частичная загрузка (например, backbone без classifier):
+model.load_state_dict(state_dict, strict=False)
+# strict=False: игнорирует отсутствующие и лишние ключи
+
+# Инспекция несовпадений:
+missing, unexpected = model.load_state_dict(state_dict, strict=False)
+print("Missing keys:", missing)
+print("Unexpected keys:", unexpected)
+
+# Полный checkpoint с состоянием тренировки:
+checkpoint = {
+    'epoch': epoch,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'scheduler_state_dict': scheduler.state_dict(),
+    'loss': best_loss,
+}
+torch.save(checkpoint, f'checkpoint_epoch{epoch}.pt')
+```
+
+---
+
+## 5. Современный Training Loop
+
+### 5.1 Полный training loop с AMP и gradient accumulation
+
+```python
+import torch
+import torch.nn as nn
+from torch.cuda.amp import GradScaler, autocast
+
+def train_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    scaler: GradScaler,
+    accumulation_steps: int = 4,
+    max_grad_norm: float = 1.0,
+    device: str = "cuda",
+):
+    model.train()
+    total_loss = 0.0
+    optimizer.zero_grad()  # в начале эпохи
+
+    for step, (x, y) in enumerate(loader):
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+        # AMP: forward pass в float16/bfloat16
+        with autocast(device_type="cuda", dtype=torch.bfloat16):
+            logits = model(x)
+            loss = criterion(logits, y)
+            # Делим loss на кол-во шагов накопления
+            loss = loss / accumulation_steps
+
+        # Scaled backward pass
+        scaler.scale(loss).backward()
+
+        # Делаем шаг оптимизатора каждые accumulation_steps батчей
+        if (step + 1) % accumulation_steps == 0:
+            # Unscale градиенты перед clip
+            scaler.unscale_(optimizer)
+
+            # Gradient clipping — стабилизирует обучение
+            grad_norm = nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=max_grad_norm
+            )
+
+            # Шаг оптимизатора (пропускается если есть inf/nan)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
+
+        total_loss += loss.item() * accumulation_steps
+
+    return total_loss / len(loader)
+```
+
+### 5.2 Зачем нужен GradScaler
+
+В float16 числа могут быть очень маленькими — градиенты уходят в ноль (underflow). `GradScaler` умножает loss на большой коэффициент `scale` перед backward, а потом делит градиенты обратно:
+
+$$\text{scaled\_loss} = \text{loss} \times S, \quad \nabla_\theta \text{loss} = \frac{\nabla_\theta \text{scaled\_loss}}{S}$$
+
+Если в градиентах появляются `inf/nan` (overflow), шаг оптимизатора пропускается, а `scale` уменьшается. Постепенно scale стабилизируется.
+
+```python
+scaler = GradScaler(
+    init_scale=2**16,       # начальный масштаб
+    growth_factor=2.0,      # умножение scale при успехе
+    backoff_factor=0.5,     # деление scale при inf/nan
+    growth_interval=2000,   # шагов до попытки увеличить scale
+)
+```
+
+::: {.callout-tip title="bfloat16 и scaler"}
+При использовании `bfloat16` (A100, H100, RTX 4xxx) `GradScaler` часто **не нужен** — bfloat16 имеет тот же диапазон экспоненты, что и float32. Но для float16 (V100, RTX 3xxx) — обязателен.
+:::
+
+### 5.3 Gradient Accumulation: зачем и как
+
+Gradient accumulation позволяет симулировать большой батч на ограниченной GPU-памяти:
+
+$$\text{effective\_batch\_size} = \text{batch\_size} \times \text{accumulation\_steps}$$
+
+```python
+# Батч 16 × 8 шагов = effective batch 128
+BATCH_SIZE = 16
+ACCUM_STEPS = 8
+
+for step, batch in enumerate(loader):
+    with autocast(device_type="cuda"):
+        loss = model(batch) / ACCUM_STEPS  # нормализация!
+    scaler.scale(loss).backward()
+
+    if (step + 1) % ACCUM_STEPS == 0:
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+```
+
+::: {.callout-warning title="Нормализация loss при accumulation"}
+Не забывайте делить loss на `ACCUM_STEPS`! Без этого эффективный learning rate вырастет в `ACCUM_STEPS` раз.
+:::
+
+### 5.4 Gradient Clipping
+
+Gradient clipping стабилизирует обучение, не давая градиентам быть слишком большими:
+
+```python
+# Клиппинг по L2-норме всех параметров:
+grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+# Клиппинг по значению (реже используется):
+torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
+
+# Логировать норму — полезно для диагностики:
+if grad_norm > 10.0:
+    print(f"Warning: large gradient norm = {grad_norm:.2f}")
+```
+
+---
+
+## 6. torch.compile: от eager к compiled режиму
+
+### 6.1 Режимы компиляции
+
+```python
+# Базовый режим — разумный баланс скорости компиляции и оптимизации
+model_compiled = torch.compile(model)
+
+# reduce-overhead — минимизирует CUDA kernel launch overhead
+# Хорошо для маленьких моделей с частыми small operations
+model_compiled = torch.compile(model, mode="reduce-overhead")
+
+# max-autotune — агрессивный поиск оптимальных конфигураций ядер
+# Компилируется ДОЛГО (10-30+ минут), но даёт максимум производительности
+model_compiled = torch.compile(model, mode="max-autotune")
+
+# fullgraph — требует полного графа, ошибка при graph break
+# Хорошо для обнаружения проблем с компиляцией
+model_compiled = torch.compile(model, fullgraph=True)
+```
+
+### 6.2 Graph Breaks: что это и как с ними бороться
+
+Graph break — момент, когда Dynamo не может продолжить трассировку. Граф разбивается на части, между которыми исполняется обычный Python.
+
+```python
+# ПЛОХО: data-dependent control flow вызывает graph break
+def bad_forward(x):
+    if x.sum() > 0:          # <- graph break: условие зависит от данных
+        return x * 2
+    else:
+        return x * -1
+
+# ХОРОШО: использовать тензорные операции
+def good_forward(x):
+    mask = (x.sum() > 0).float()
+    return x * (2 * mask - 1 + mask)  # или torch.where
+
+# Диагностика graph breaks:
+import torch._dynamo
+torch._dynamo.explain(model)(sample_input)  # покажет все breaks
+```
+
+Типичные причины graph breaks:
+- Вызов `.item()` (преобразует тензор в Python scalar)
+- `print()` внутри forward
+- Внешние библиотеки (numpy, scipy)
+- Динамические размеры (dynamic shapes без пометки)
+- Python-уровневые условия на значения тензоров
+
+```python
+# dynamic=True позволяет компилировать с переменными размерами батча
+model_compiled = torch.compile(model, dynamic=True)
+```
+
+### 6.3 Практические советы по torch.compile
+
+```python
+# Сохранить скомпилированную модель (кэш компиляции):
+import os
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/tmp/torch_compile_cache"
+
+# Отключить compile для конкретных методов:
+class Model(nn.Module):
+    @torch.compiler.disable
+    def slow_python_method(self):
+        # Этот метод не будет компилироваться
+        pass
+
+# Измерить реальный выигрыш:
+import time
+
+def benchmark(fn, x, warmup=5, iters=100):
+    for _ in range(warmup):
+        fn(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        fn(x)
+    torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / iters * 1000  # ms
+
+eager_ms = benchmark(model, x)
+compiled_ms = benchmark(torch.compile(model), x)
+print(f"Speedup: {eager_ms / compiled_ms:.2f}x")
+```
+
+---
+
+## 7. Distributed Training: DDP и FSDP
+
+### 7.1 Когда переходить к distributed training
+
+| Ситуация | Решение |
+|---|---|
+| Модель помещается в 1 GPU, нужно ускорение | DDP |
+| Модель не помещается в 1 GPU | FSDP или tensor parallelism |
+| Очень большие батчи | DDP с gradient accumulation |
+| > 10B параметров | FSDP + activation checkpointing |
+
+### 7.2 DistributedDataParallel (DDP)
+
+DDP — наиболее простой и эффективный способ обучения на нескольких GPU. Каждый процесс хранит **полную копию модели** и обрабатывает свой батч. Градиенты синхронизируются через AllReduce после backward.
+
+```python
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def setup_ddp(rank, world_size):
+    dist.init_process_group(
+        backend="nccl",   # NCCL для GPU, gloo для CPU
+        rank=rank,
+        world_size=world_size
+    )
+    torch.cuda.set_device(rank)
+
+def cleanup_ddp():
+    dist.destroy_process_group()
+
+def train_ddp(rank, world_size):
+    setup_ddp(rank, world_size)
+
+    model = MyModel().to(rank)
+    model = DDP(model, device_ids=[rank])
+
+    # DistributedSampler — разбивает данные между процессами
+    from torch.utils.data.distributed import DistributedSampler
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    loader = DataLoader(dataset, batch_size=64, sampler=sampler)
+
+    for epoch in range(num_epochs):
+        sampler.set_epoch(epoch)  # важно для перемешивания
+        for batch in loader:
+            # Обычный training loop
+            ...
+
+    cleanup_ddp()
+
+# Запуск:
+# torchrun --nproc_per_node=4 train.py
+```
+
+### 7.3 Fully Sharded Data Parallel (FSDP)
+
+FSDP делит параметры, градиенты и состояния оптимизатора между GPU. Это позволяет обучать модели, которые не помещаются на одну GPU:
+
+```python
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import ShardingStrategy, MixedPrecision
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+# Политика: разбить каждый TransformerEncoderLayer отдельно
+wrap_policy = transformer_auto_wrap_policy(
+    transformer_layer_cls={nn.TransformerEncoderLayer}
+)
+
+mixed_precision = MixedPrecision(
+    param_dtype=torch.bfloat16,
+    reduce_dtype=torch.float32,   # AllReduce в float32 для точности
+    buffer_dtype=torch.float32,
+)
+
+model = FSDP(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,  # максимальное разбиение
+    auto_wrap_policy=wrap_policy,
+    mixed_precision=mixed_precision,
+    device_id=rank,
+)
+```
+
+::: {.callout-tip title="DDP vs FSDP — что выбрать"}
+- **DDP**: модель помещается в GPU, хотите простоту и предсказуемость. Overhead минимален.
+- **FSDP**: модель не помещается или хотите обучать 7B+ параметров. Больше сложности, но единственный выбор для очень больших моделей.
+- Для быстрого старта — **Hugging Face Accelerate** абстрагирует оба варианта.
+:::
+
+---
+
+## 8. Профилирование
+
+### 8.1 torch.profiler
+
+```python
+from torch.profiler import profile, record_function, ProfilerActivity
+
+with profile(
+    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    record_shapes=True,         # записывать формы тензоров
+    profile_memory=True,        # профилировать выделение памяти
+    with_stack=True,            # стеки вызовов (замедляет)
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs/profiler'),
+    schedule=torch.profiler.schedule(
+        wait=1,     # пропустить 1 шаг (разогрев)
+        warmup=1,   # 1 шаг warmup
+        active=5,   # профилировать 5 шагов
+        repeat=2    # повторить 2 раза
+    )
+) as prof:
+    for step, (x, y) in enumerate(loader):
+        with record_function("data_transfer"):
+            x, y = x.to(device), y.to(device)
+
+        with record_function("forward"):
+            loss = model(x)
+
+        with record_function("backward"):
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        prof.step()  # обязательно!
+
+# Вывести топ операций по CUDA времени:
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
+```
+
+### 8.2 Анализ профиля
+
+```
+# Пример вывода:
+Name                          CPU%   CUDA%   CUDA Mem
+aten::mm                      12%    68%     0 b
+aten::addmm                   8%     15%     512 Mb
+cudnn::conv2d                 3%     10%     128 Mb
+aten::copy_                   5%     3%      0 b
+```
+
+Типичные проблемы, которые обнаруживает профилировщик:
+- Много времени в `aten::copy_` — частые CPU/GPU трансферы
+- Много маленьких CUDA kernels — нужен `torch.compile`
+- Большой "idle" GPU — узкое место в DataLoader (увеличьте `num_workers`)
+
+### 8.3 Подсчёт FLOPs
+
+```python
+# Через torch.profiler:
+with profile(with_flops=True) as prof:
+    model(x)
+
+flops = sum(e.flops for e in prof.events())
+print(f"FLOPs: {flops / 1e9:.2f} GFLOPs")
+
+# Через сторонние библиотеки:
+# pip install fvcore
+from fvcore.nn import FlopCountAnalysis
+flops = FlopCountAnalysis(model, x)
+print(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs")
+print(flops.by_module())  # по слоям
+```
+
+---
+
+## 9. Debugging: охота за NaN и взрывными градиентами
+
+### 9.1 Anomaly Detection
+
+```python
+# Включить перед тренировкой при подозрении на NaN:
+torch.autograd.set_detect_anomaly(True)
+
+# Теперь backward выдаст точный стектрейс где появился NaN:
+try:
+    loss.backward()
+except RuntimeError as e:
+    print(f"Anomaly detected: {e}")
+
+# ВНИМАНИЕ: замедляет в 10-100x, только для отладки!
+torch.autograd.set_detect_anomaly(False)
+```
+
+### 9.2 NaN Hunting
+
+```python
+def check_model_for_nan(model, prefix=""):
+    """Проверить все параметры и градиенты на NaN/Inf."""
+    issues = []
+    for name, param in model.named_parameters():
+        full_name = f"{prefix}.{name}" if prefix else name
+        if torch.isnan(param).any():
+            issues.append(f"NaN in param: {full_name}")
+        if torch.isinf(param).any():
+            issues.append(f"Inf in param: {full_name}")
+        if param.grad is not None:
+            if torch.isnan(param.grad).any():
+                issues.append(f"NaN in grad: {full_name}")
+            if torch.isinf(param.grad).any():
+                issues.append(f"Inf in grad: {full_name}")
+    return issues
+
+# Использование после backward:
+issues = check_model_for_nan(model)
+if issues:
+    for issue in issues:
+        print(f"[WARNING] {issue}")
+```
+
+### 9.3 Gradient Checking
+
+Численная проверка автоматически вычисленных градиентов:
+
+```python
+# Для кастомных функций — проверить правильность backward:
+from torch.autograd import gradcheck
+
+# Входные данные должны быть float64 для точности конечных разностей
+x = torch.randn(3, 4, dtype=torch.float64, requires_grad=True)
+
+# gradcheck сравнивает аналитический и численный градиент
+result = gradcheck(
+    my_custom_function,
+    (x,),
+    eps=1e-6,          # шаг конечных разностей
+    atol=1e-4,         # абсолютная толерантность
+    rtol=1e-3,         # относительная толерантность
+)
+print(f"Gradcheck passed: {result}")
+```
+
+### 9.4 Мониторинг нормы градиентов
+
+```python
+import wandb  # или tensorboard
+
+def log_grad_norms(model, step):
+    """Логировать нормы градиентов по слоям."""
+    norms = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            norms[f"grad_norm/{name}"] = param.grad.norm().item()
+
+    total_norm = 0
+    for param in model.parameters():
+        if param.grad is not None:
+            total_norm += param.grad.norm() ** 2
+    norms["grad_norm/total"] = total_norm.sqrt().item()
+
+    wandb.log(norms, step=step)
+    return norms["grad_norm/total"]
+```
+
+---
+
+## 10. Современный стек: инструменты и библиотеки
+
+### 10.1 PyTorch Lightning vs чистый PyTorch
+
+**Чистый PyTorch** — полный контроль, нет магии, легко дебажить, больше кода.
+
+**PyTorch Lightning** — убирает boilerplate, автоматический DDP/FSDP, удобные callbacks, но скрывает детали.
+
+```python
+# Lightning: минимальный пример
+import lightning as L
+
+class LitModel(L.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.model = MyModel()
+        self.criterion = nn.CrossEntropyLoss()
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self.model(x)
+        loss = self.criterion(logits, y)
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=100
+        )
+        return [optimizer], [scheduler]
+
+# Запуск с DDP, AMP, gradient clipping — одна строка:
+trainer = L.Trainer(
+    max_epochs=100,
+    precision="bf16-mixed",
+    gradient_clip_val=1.0,
+    accumulate_grad_batches=4,
+    devices=4,                    # 4 GPU
+    strategy="ddp",
+)
+trainer.fit(model, train_loader, val_loader)
+```
+
+### 10.2 Hugging Face Accelerate
+
+Accelerate — минимальная обёртка для distributed training без смены архитектуры кода:
+
+```python
+from accelerate import Accelerator
+
+accelerator = Accelerator(
+    mixed_precision="bf16",
+    gradient_accumulation_steps=4,
+)
+
+model, optimizer, train_loader = accelerator.prepare(
+    model, optimizer, train_loader
+)
+
+for batch in train_loader:
+    with accelerator.accumulate(model):
+        loss = model(batch)
+        accelerator.backward(loss)
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### 10.3 einops: читаемые тензорные операции
+
+```python
+from einops import rearrange, reduce, repeat, einsum
+
+# Вместо view/reshape/permute — читаемая нотация:
+x = torch.randn(32, 8, 64, 64)  # (batch, channels, H, W)
+
+# Rearrange: изменить порядок осей и размерности
+patches = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=8, p2=8)
+# Результат: (32, 64, 512) — патчи для ViT
+
+# Reduce: объединение по осям
+mean_pool = reduce(x, 'b c h w -> b c', 'mean')
+# Результат: (32, 8) — global average pooling
+
+# Repeat: расширение
+x_expanded = repeat(x[:, 0], 'b h w -> b c h w', c=8)
+
+# Einsum: матричные произведения с именованными осями
+q = torch.randn(32, 8, 64, 128)  # (batch, heads, seq, dim)
+k = torch.randn(32, 8, 64, 128)
+attn = einsum(q, k, 'b h i d, b h j d -> b h i j') / 128**0.5
+```
+
+::: {.callout-tip title="einops в production"}
+`einops` совместим с `torch.compile` и работает в JIT. Используйте его везде — код становится самодокументируемым. Нотация `'b c h w -> b (h w) c'` говорит сама за себя, в отличие от `x.permute(0,2,3,1).reshape(b, -1, c)`.
+:::
+
+---
+
+## 11. Итоговые паттерны: production-ready training
+
+### 11.1 Полная структура проекта
+
+```
+my_project/
+├── configs/
+│   └── train.yaml       # hydra / simple config
+├── data/
+│   ├── dataset.py       # Dataset классы
+│   └── transforms.py    # аугментации
+├── models/
+│   ├── __init__.py
+│   └── my_model.py      # nn.Module
+├── training/
+│   ├── trainer.py       # training loop
+│   ├── optimizer.py     # optimizer + scheduler
+│   └── callbacks.py     # checkpointing, early stopping
+└── train.py             # entrypoint
+```
+
+### 11.2 Чеклист production training loop
+
+```python
+# 1. device-agnostic код
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 2. reproducibility
+torch.manual_seed(42)
+torch.backends.cudnn.deterministic = True  # чуть медленнее, но воспроизводимо
+
+# 3. эффективный DataLoader
+loader = DataLoader(
+    dataset, batch_size=64, num_workers=4,
+    pin_memory=True, persistent_workers=True,
+    prefetch_factor=2
+)
+
+# 4. AMP scaler
+scaler = GradScaler()
+
+# 5. compile (опционально, но рекомендуется)
+model = torch.compile(model)
+
+# 6. training loop с gradient accumulation + clipping
+ACCUM = 4
+for step, batch in enumerate(loader):
+    x, y = [t.to(device, non_blocking=True) for t in batch]
+    with autocast(device_type="cuda", dtype=torch.bfloat16):
+        loss = model(x, y) / ACCUM
+    scaler.scale(loss).backward()
+    if (step + 1) % ACCUM == 0:
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)  # чуть быстрее обычного zero_grad
+
+# 7. checkpoint с полным состоянием
+if val_loss < best_loss:
+    torch.save({
+        'step': global_step,
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scaler': scaler.state_dict(),
+        'scheduler': scheduler.state_dict(),
+    }, 'best_checkpoint.pt')
+```
+
+::: {.callout-tip title="zero_grad(set_to_none=True)"}
+Передача `set_to_none=True` устанавливает `.grad = None` вместо заполнения нулями. Это экономит один проход по памяти и ускоряет обучение на несколько процентов.
+:::
+
+---
+
+## 12. Что делать дальше
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/02-pytorch/basic.html) / [advanced](../../seminars/02-pytorch/advanced.html)): Написание полного цикла обучения с нуля на MNIST. Интерактивное исследование влияния гиперпараметров (lr, batch size). Продвинутая часть: gradient accumulation, AMP, profiling.
-- **ДЗ**: [02-pytorch](../../homework/02-pytorch/README.qmd) — Обучение классификатора на CIFAR-10.
+- **Семинар** ([basic](../../seminars/02-pytorch/basic.html) / [advanced](../../seminars/02-pytorch/advanced.html)): Полный training loop на MNIST, эксперименты с batch size/lr, продвинутая часть — AMP + gradient accumulation + профилирование.
+- **ДЗ**: [02-pytorch](../../homework/02-pytorch/README.qmd) — Обучение классификатора на CIFAR-10 с AMP, gradient accumulation и torch.compile.
 :::
 
-::: {.callout-important title="Минимум на запоминание"}
-1. `.detach()` обязателен, когда вы сохраняете loss/metrics в список для графиков, иначе вы утечёте весь граф и забьете память.
-2. Не забывайте `optimizer.zero_grad()`, иначе градиенты будут суммироваться с предыдущего шага.
-3. `model.train()` и `model.eval()` критически важны из-за слоев, которые ведут себя по-разному во время обучения и инференса.
+::: {.callout-important title="Топ-10 вещей на запоминание"}
+1. **`.detach().item()`** при логировании — иначе утечка графа и OOM.
+2. **`optimizer.zero_grad(set_to_none=True)`** в начале каждого шага оптимизатора.
+3. **`model.train()` / `model.eval()`** — критично для BatchNorm и Dropout.
+4. **`pin_memory=True` + `non_blocking=True`** — асинхронный transfer на GPU.
+5. **`loss / ACCUM_STEPS`** при gradient accumulation — не забудьте нормализацию.
+6. **`scaler.unscale_()` перед `clip_grad_norm_`** — иначе клиппинг по scaled градиентам.
+7. **Strides и contiguous** — view не копирует данные, `.contiguous()` — копирует.
+8. **`fullgraph=True`** при первом запуске `torch.compile` — выявит все graph breaks.
+9. **`register_buffer`** для non-trainable тензоров, которые должны попасть в `state_dict`.
+10. **`torch.autograd.set_detect_anomaly(True)`** только при отладке — замедляет в 10-100x.
 :::
+
+---
 
 ## Литература {.appendix}
 
 ::: {#refs}
 :::
+
+**Дополнительные ресурсы:**
+
+- Paszke, A. et al. (2019). *PyTorch: An Imperative Style, High-Performance Deep Learning Library*. NeurIPS 2019. [arXiv:1912.01703](https://arxiv.org/abs/1912.01703)
+- PyTorch документация: [pytorch.org/docs](https://pytorch.org/docs/stable/)
+- torch.compile руководство: [pytorch.org/tutorials/intermediate/torch_compile_tutorial.html](https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html)
+- TorchDynamo/TorchInductor deep dive: [dev-discuss.pytorch.org](https://dev-discuss.pytorch.org/t/torchinductor-a-pytorch-native-compiler-with-define-by-run-ir-and-symbolic-shapes/747)
+- Hugging Face Accelerate: [huggingface.co/docs/accelerate](https://huggingface.co/docs/accelerate)
+- einops: [einops.rocks](https://einops.rocks)

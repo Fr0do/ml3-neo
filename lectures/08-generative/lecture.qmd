@@ -1,6 +1,6 @@
 ---
-title: "Лекция 08 — Введение в генеративные модели"
-subtitle: "VAE и диффузия: от латентного пространства к синтезу данных"
+title: "Лекция 08 — Generative Models"
+subtitle: "VAE, Diffusion, Flow Matching: как научить нейросеть создавать"
 author: "ml3-neo"
 date: last-modified
 bibliography: ../../refs.bib
@@ -14,100 +14,681 @@ format:
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **восьмой модуль**, открывающий блок генеративного моделирования. Мы предполагаем, что вы уверенно владеете архитектурами вроде CNN (модуль 04), а также понимаете базовую оптимизацию и кросс-энтропию.
+Это **восьмой модуль** — открываем блок генеративного моделирования. Предполагается знание CNN (модуль 04), базовой теории вероятностей (нормальное распределение, KL-дивергенция) и уверенная работа с PyTorch.
 :::
 
 ::: {.level-toggle}
 [basic](../../seminars/08-generative/basic.html){.active} · [advanced](../../seminars/08-generative/advanced.html)
 :::
 
-## 1. Постановка задачи генеративного моделирования
+---
 
-В классифицирующих задачах (discriminative modeling) мы учим $p(y|x)$ — вероятность метки при заданном входе. В генеративном моделировании (generative modeling) мы хотим выучить само распределение данных $p(x)$. 
+## 1. Обзор генеративных моделей
 
-Это позволяет нам:
-- **Density estimation:** оценивать вероятность (правдоподобие) новых объектов.
-- **Sampling:** генерировать новые, ранее не виданные объекты $x \sim p(x)$.
+### Density Estimation: чему учится генеративная модель?
 
-Но распределение $p(x)$ для изображений (например, $256{\times}256{\times}3$) огромной размерности невероятно сложно. Мы не можем задать его явно.
+В дискриминативных задачах мы учим $p(y|x)$ — вероятность метки при заданном входе. Генеративное моделирование ставит принципиально другую задачу: выучить само распределение данных $p_\theta(x) \approx p_{\text{data}}(x)$.
 
-## 2. Модели со скрытыми переменными (Latent Variable Models)
+Это позволяет:
 
-Идея: давайте введём скрытое пространство $z$ (обычно меньшей размерности, чем $x$), где распределение простое (например, $\mathcal{N}(0, I)$ — это наш **prior** $p(z)$). Тогда процесс генерации будет таким:
-1. Сэмпл $z \sim p(z)$.
-2. Декодер генерирует $x$ из $z$, задавая $p(x|z)$.
+- **Sampling**: генерировать новые объекты $x \sim p_\theta(x)$
+- **Density estimation**: оценивать правдоподобие — насколько «реалистичен» данный объект
+- **Conditional generation**: $p_\theta(x | \text{условие})$ — текст по изображению, изображение по описанию
 
-Тогда $p(x) = \int p(x|z)p(z)dz$. 
-Проблема: этот интеграл невычислим на практике. Для обучения нам нужно также оценивать **posterior** $p(z|x)$ — какое $z$ сгенерировало данный $x$. По формуле Байеса $p(z|x) = \frac{p(x|z)p(z)}{p(x)}$, но знаменатель снова невычислим.
+### Explicit vs Implicit модели
 
-## 3. Вариационный автокодировщик (VAE)
+| Класс | Пример | $p(x)$ явно? | Sampling |
+|---|---|---|---|
+| **Explicit (tractable)** | Autoregressive (PixelCNN, GPT) | Да | Медленно (авторег.) |
+| **Explicit (approx.)** | VAE | Нижняя граница | Быстро |
+| **Implicit** | GAN | Нет | Быстро |
+| **Score-based** | Diffusion (DDPM) | Нет явно | Итеративно |
+| **Flow-based** | Flow Matching | Да (через ODE) | Один проход |
 
-Вместо того чтобы считать точный posterior, VAE (Variational Autoencoder) аппроксимирует его параметризованным распределением $q(z|x)$ (это наш **энкодер**).
+### Пространство применений
 
-Мы хотим максимизировать логарифм правдоподобия $\log p(x)$. С помощью вариационного вывода мы можем получить нижнюю оценку — **ELBO** (Evidence Lower Bound):
+- **Изображения**: Stable Diffusion, DALL-E, Midjourney
+- **Аудио**: AudioLM, MusicGen, WaveNet
+- **Молекулы**: генерация новых лекарств (DiffDock, AlphaFold)
+- **Видео**: Sora, Runway
+- **Текст**: GPT (авторегрессивный, отдельная лекция)
+
+---
+
+## 2. VAE: Variational Autoencoder
+
+### Модель со скрытыми переменными
+
+Введём скрытое пространство $z \in \mathbb{R}^d$ (обычно $d \ll \dim(x)$). Генеративный процесс:
 
 $$
-\log p(x) \ge \mathbb{E}_{q(z|x)}[\log p(x|z)] - \mathbb{KL}(q(z|x) \| p(z)) = \text{ELBO}
+z \sim p(z) = \mathcal{N}(0, I) \quad \text{(prior)}
+$$
+$$
+x \sim p_\theta(x|z) \quad \text{(декодер, параметризован } \theta\text{)}
 $$
 
-- Первый член — **reconstruction loss**: насколько хорошо декодер восстанавливает $x$ из $z$.
-- Второй член — **KL-дивергенция**: регуляризатор, заставляющий $q(z|x)$ быть похожим на prior $p(z)$ (стандартное нормальное распределение).
+Маргинальное правдоподобие: $p_\theta(x) = \int p_\theta(x|z)\, p(z)\, dz$ — **невычислимо** (integral over all $z$).
 
-### Reparameterization trick
-Если мы сэмплируем $z \sim q(z|x) = \mathcal{N}(\mu(x), \sigma^2(x))$, мы не можем пробросить градиент через операцию сэмплирования.
-**Трюк:** представляем $z$ как $z = \mu + \sigma \cdot \varepsilon$, где $\varepsilon \sim \mathcal{N}(0, I)$.
-Теперь градиент спокойно течёт через $\mu$ и $\sigma$!
+Истинный posterior: $p_\theta(z|x) = \frac{p_\theta(x|z)\, p(z)}{p_\theta(x)}$ — тоже недоступен из-за знаменателя.
 
-## 4. Диффузионные модели (DDPM)
+### Вариационный вывод и ELBO
 
-Диффузия подходит к проблеме иначе, через марковский процесс зашумления и восстановления.
+Аппроксимируем истинный posterior семейством распределений $q_\phi(z|x)$ (энкодер). Задача: максимизировать $\log p_\theta(x)$.
 
-### Forward process
-Постепенно добавляем гауссовский шум к данным $x_0$ за $T$ шагов по заранее заданному расписанию (schedule) дисперсий $\beta_t$:
-$$ q(x_t|x_{t-1}) = \mathcal{N}(x_t; \sqrt{1-\beta_t}x_{t-1}, \beta_t I) $$
-В конце $x_T$ становится чистым шумом $\mathcal{N}(0, I)$.
+По неравенству Йенсена получаем **ELBO** (Evidence Lower BOund):
 
-### Reverse process
-Обучаем нейросеть $p_\theta(x_{t-1}|x_t)$ обращать процесс — предсказывать предыдущий шаг (немного менее зашумленный). 
+$$
+\log p_\theta(x) \ge \underbrace{\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]}_{\text{Reconstruction}} - \underbrace{D_{\mathrm{KL}}(q_\phi(z|x) \,\|\, p(z))}_{\text{Regularization}} = \mathcal{L}_{\mathrm{ELBO}}
+$$
 
-### Training objective
-На практике сеть (обычно U-Net) обучается предсказывать **добавленный шум** $\varepsilon$, а не сам $x_0$ или $x_{t-1}$. 
-$$ \mathcal{L} = \mathbb{E}_{t, x_0, \varepsilon} \left[ \| \varepsilon - \varepsilon_\theta(x_t, t) \|^2 \right] $$
-Это эквивалентно вариационной нижней оценке для диффузии (с определёнными весами).
+Максимизируем ELBO по параметрам $\theta$ (декодер) и $\phi$ (энкодер) одновременно.
 
-### Интуиция Score Matching
-Диффузионные модели тесно связаны со score-based generative models. Сеть $\varepsilon_\theta$ по сути учится оценивать $\nabla_x \log p_t(x)$ — направление, в котором плотность данных увеличивается (векторное поле, указывающее к manifold данных).
+**Интерпретация**:
+- **Reconstruction term**: насколько хорошо $z$, сэмплированный из энкодера, позволяет декодеру восстановить исходный $x$. Максимизируем → учим декодер.
+- **KL term**: регуляризатор, «прижимающий» posterior к prior. Минимизируем KL → латентное пространство гладкое и структурированное, можно сэмплировать из prior.
 
-## 5. Сравнение подходов
+### KL для гауссовских распределений
 
-| Метод | Плюсы | Минусы | Применения |
-|-------|-------|--------|------------|
-| **VAE** | Математически элегантен, явный латентный вектор, быстрый сэмплинг. | Размытые изображения (blurriness), хуже FID. | Представления (disentanglement), генерация молекул, базы для Latent Diffusion. |
-| **GAN** | Очень высокое качество (sharp), быстрый сэмплинг. | Нестабильное обучение (mode collapse), не оценивают p(x). | High-res image generation (StyleGAN). |
-| **Diffusion**| State-of-the-art качество, стабильное обучение, отлично ложится на кондиционирование. | Медленный сэмплинг (сотни шагов). | Text-to-image (Stable Diffusion, Midjourney), audio synthesis. |
+Если $q_\phi(z|x) = \mathcal{N}(\mu_\phi(x), \text{diag}(\sigma_\phi^2(x)))$ и $p(z) = \mathcal{N}(0, I)$, KL считается аналитически:
 
-## 6. Практика: Stable Diffusion и HuggingFace
-Stable Diffusion — это диффузия, работающая не в пиксельном пространстве (дорого!), а в латентном пространстве предварительно обученного VAE (Latent Diffusion Model).
-Библиотека `diffusers` от HuggingFace позволяет загружать такие пайплайны в три строчки:
+$$
+D_{\mathrm{KL}}(q \,\|\, p) = -\frac{1}{2} \sum_{j=1}^{d} \left(1 + \log \sigma_j^2 - \mu_j^2 - \sigma_j^2\right)
+$$
+
+### Reparameterization Trick
+
+Проблема: мы не можем взять градиент по $\phi$ через операцию $z \sim q_\phi(z|x)$ — сэмплирование не дифференцируемо.
+
+**Решение**: переписываем $z$ через детерминированную функцию и отдельный шум:
+
+$$
+z = \mu_\phi(x) + \sigma_\phi(x) \odot \varepsilon, \quad \varepsilon \sim \mathcal{N}(0, I)
+$$
+
+Теперь стохастичность вынесена в $\varepsilon$, а $\mu$ и $\sigma$ — дифференцируемые функции от $x$. Градиенты текут через $\mu$ и $\sigma$ нормально.
+
+### Архитектура и код
+
 ```python
-from diffusers import StableDiffusionPipeline
-pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
-image = pipe("a photograph of an astronaut riding a horse").images[0]
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class VAEEncoder(nn.Module):
+    def __init__(self, in_channels, latent_dim):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 4, stride=2, padding=1),  # /2
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),            # /2
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),           # /2
+            nn.ReLU(),
+        )
+        self.flatten_dim = 128 * 4 * 4  # для входа 32x32
+        self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)
+        self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim)
+
+    def forward(self, x):
+        h = self.conv(x).flatten(1)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)  # логарифм дисперсии для численной стабильности
+        return mu, logvar
+
+
+class VAEDecoder(nn.Module):
+    def __init__(self, latent_dim, out_channels):
+        super().__init__()
+        self.fc = nn.Linear(latent_dim, 128 * 4 * 4)
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, out_channels, 4, stride=2, padding=1),
+            nn.Sigmoid(),  # пиксели в [0, 1]
+        )
+
+    def forward(self, z):
+        h = self.fc(z).view(-1, 128, 4, 4)
+        return self.deconv(h)
+
+
+class VAE(nn.Module):
+    def __init__(self, in_channels=3, latent_dim=128):
+        super().__init__()
+        self.encoder = VAEEncoder(in_channels, latent_dim)
+        self.decoder = VAEDecoder(latent_dim, in_channels)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + std * eps
+
+    def forward(self, x):
+        mu, logvar = self.encoder(x)
+        z = self.reparameterize(mu, logvar)
+        recon = self.decoder(z)
+        return recon, mu, logvar
+
+    def sample(self, n, device):
+        z = torch.randn(n, self.encoder.fc_mu.out_features).to(device)
+        return self.decoder(z)
+
+
+def vae_loss(recon, x, mu, logvar, beta=1.0):
+    # Reconstruction: binary cross-entropy (пиксели как Bernoulli)
+    recon_loss = F.binary_cross_entropy(recon, x, reduction='sum') / x.size(0)
+
+    # KL: аналитически
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
+
+    return recon_loss + beta * kl, recon_loss, kl
 ```
 
-## 7. Что делать дальше
+---
+
+## 3. β-VAE и Disentanglement
+
+### Проблема стандартного VAE
+
+Латентное пространство стандартного VAE, как правило, **запутано (entangled)**: каждая координата $z_j$ контролирует сразу несколько факторов вариации (форму, цвет, угол поворота одновременно).
+
+### β-VAE
+
+Higgins et al. (2017) предложили просто увеличить вес KL-члена:
+
+$$
+\mathcal{L}_{\beta\text{-VAE}} = \mathbb{E}_{q}[\log p(x|z)] - \beta \cdot D_{\mathrm{KL}}(q(z|x) \,\|\, p(z))
+$$
+
+При $\beta > 1$ KL-регуляризация сильнее. Каждый нейрон в $z$ специализируется на одном факторе: один контролирует угол поворота, другой — освещение, третий — форму.
+
+::: {.callout-warning title="Трейдофф"}
+Большой $\beta$ улучшает disentanglement, но ухудшает качество реконструкции. Типичные значения: $\beta \in [2, 10]$. Это простое изменение — одна строка кода: `beta * kl` вместо `kl`.
+:::
+
+### Применения disentangled VAE
+
+- **Контролируемая генерация**: меняем одну координату $z_j$ → меняем один атрибут
+- **Морфинг**: интерполируем в латентном пространстве
+- **Представление молекул**: каждая координата = химическое свойство
+
+---
+
+## 4. DDPM: Denoising Diffusion Probabilistic Models
+
+Ho, Jain & Abbeel (2020) — «Denoising Diffusion Probabilistic Models» (arXiv:2006.11239).
+
+### Интуиция
+
+Диффузия вдохновлена нелинейной термодинамикой: постепенно «разрушаем» данные шумом (forward process), затем учим нейросеть обращать этот процесс (reverse process).
+
+### Forward Process (добавление шума)
+
+Марковская цепь из $T$ шагов ($T = 1000$ типично), каждый добавляет гауссовский шум по расписанию $\{\beta_t\}_{t=1}^T$:
+
+$$
+q(x_t | x_{t-1}) = \mathcal{N}\!\left(x_t;\, \sqrt{1-\beta_t}\, x_{t-1},\, \beta_t I\right)
+$$
+
+Удобное свойство: можно сэмплировать $x_t$ сразу из $x_0$ без итераций. Пусть $\alpha_t = 1 - \beta_t$ и $\bar{\alpha}_t = \prod_{s=1}^t \alpha_s$:
+
+$$
+q(x_t | x_0) = \mathcal{N}\!\left(x_t;\, \sqrt{\bar{\alpha}_t}\, x_0,\, (1-\bar{\alpha}_t) I\right)
+$$
+
+Иными словами: $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \varepsilon$, где $\varepsilon \sim \mathcal{N}(0, I)$.
+
+При $t = T$: $\bar{\alpha}_T \approx 0$, т.е. $x_T \approx \mathcal{N}(0, I)$ — чистый шум.
+
+### Reverse Process (денойзинг)
+
+Обучаем нейросеть $p_\theta$ обращать каждый шаг. Posterior $q(x_{t-1}|x_t, x_0)$ аналитически:
+
+$$
+q(x_{t-1}|x_t, x_0) = \mathcal{N}\!\left(x_{t-1};\, \tilde{\mu}_t(x_t, x_0),\, \tilde{\beta}_t I\right)
+$$
+
+$$
+\tilde{\mu}_t = \frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1-\bar{\alpha}_t} x_0 + \frac{\sqrt{\alpha_t}(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t} x_t
+$$
+
+$$
+\tilde{\beta}_t = \frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}\,\beta_t
+$$
+
+Модель $p_\theta(x_{t-1}|x_t)$ параметризуется как $\mathcal{N}(\mu_\theta(x_t, t), \sigma_t^2 I)$.
+
+### Training Objective: предсказываем шум
+
+Ho et al. показали, что оптимально учить сеть предсказывать добавленный шум $\varepsilon$:
+
+$$
+\mathcal{L}_{\text{simple}} = \mathbb{E}_{t \sim [1,T],\, x_0,\, \varepsilon \sim \mathcal{N}(0,I)} \left[\left\|\varepsilon - \varepsilon_\theta\!\left(\sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon,\, t\right)\right\|^2\right]
+$$
+
+Из предсказанного $\varepsilon_\theta$ получаем $\hat{x}_0 = \frac{1}{\sqrt{\bar{\alpha}_t}}(x_t - \sqrt{1-\bar{\alpha}_t}\,\varepsilon_\theta)$, а затем — $\mu_\theta$.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+
+class DiffusionSchedule:
+    def __init__(self, T=1000, beta_start=1e-4, beta_end=0.02):
+        self.T = T
+        self.betas = torch.linspace(beta_start, beta_end, T)     # linear schedule
+        self.alphas = 1.0 - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+
+    def q_sample(self, x0, t, noise=None):
+        """Сэмплировать x_t из x_0 напрямую (reparameterization forward)"""
+        if noise is None:
+            noise = torch.randn_like(x0)
+        sqrt_ab = self.alpha_bars[t].sqrt().view(-1, 1, 1, 1)
+        sqrt_1mab = (1 - self.alpha_bars[t]).sqrt().view(-1, 1, 1, 1)
+        return sqrt_ab * x0 + sqrt_1mab * noise, noise
+
+
+class DDPMTrainer:
+    def __init__(self, model, schedule: DiffusionSchedule, device):
+        self.model = model  # UNet, принимает (x_t, t)
+        self.schedule = schedule
+        self.device = device
+
+    def loss(self, x0):
+        batch = x0.size(0)
+        t = torch.randint(0, self.schedule.T, (batch,), device=self.device)
+        x_t, noise = self.schedule.q_sample(x0, t)
+        predicted_noise = self.model(x_t, t)
+        return nn.functional.mse_loss(predicted_noise, noise)
+
+    @torch.no_grad()
+    def sample(self, shape):
+        """DDPM sampling: T шагов денойзинга"""
+        x = torch.randn(shape, device=self.device)
+        for t in reversed(range(self.schedule.T)):
+            t_batch = torch.full((shape[0],), t, device=self.device, dtype=torch.long)
+            eps_pred = self.model(x, t_batch)
+
+            alpha = self.schedule.alphas[t]
+            alpha_bar = self.schedule.alpha_bars[t]
+            beta = self.schedule.betas[t]
+
+            # Восстанавливаем x_{t-1}
+            coef = (1 - alpha) / (1 - alpha_bar).sqrt()
+            mean = (x - coef * eps_pred) / alpha.sqrt()
+
+            if t > 0:
+                noise = torch.randn_like(x)
+                x = mean + beta.sqrt() * noise
+            else:
+                x = mean
+        return x
+```
+
+---
+
+## 5. Noise Schedule: Linear vs Cosine
+
+### Linear Schedule
+
+Ho et al. используют линейное расписание: $\beta_t$ равномерно возрастает от $\beta_1 = 10^{-4}$ до $\beta_T = 0.02$.
+
+Проблема: при линейном расписании $\bar{\alpha}_t$ падает быстро на ранних шагах, что приводит к неэффективному использованию шагов.
+
+### Cosine Schedule
+
+Nichol & Dhariwal (2021) предложили косинусное расписание, дающее более равномерное добавление шума:
+
+$$
+\bar{\alpha}_t = \frac{f(t)}{f(0)}, \quad f(t) = \cos\!\left(\frac{t/T + s}{1 + s} \cdot \frac{\pi}{2}\right)^2
+$$
+
+```python
+def cosine_schedule(T, s=0.008):
+    t = torch.arange(T + 1, dtype=torch.float64)
+    f = torch.cos((t / T + s) / (1 + s) * torch.pi / 2) ** 2
+    alpha_bars = f / f[0]
+    betas = 1 - alpha_bars[1:] / alpha_bars[:-1]
+    return betas.clamp(max=0.999).float()
+```
+
+### Timestep Embedding
+
+Чтобы UNet знал, на каком шаге $t$ он работает, используется **sinusoidal positional embedding** (аналог Transformer):
+
+$$
+\text{emb}(t)_{2i} = \sin\!\left(\frac{t}{10000^{2i/d}}\right), \quad \text{emb}(t)_{2i+1} = \cos\!\left(\frac{t}{10000^{2i/d}}\right)
+$$
+
+Этот вектор инжектируется в каждый residual block UNet через добавление (после проекции).
+
+---
+
+## 6. DDIM: Детерминированный Семплинг
+
+Song et al. (2020) — DDIM (Denoising Diffusion Implicit Models) — позволяет делать инференс за значительно меньше шагов.
+
+### Ключевая идея
+
+DDPM использует стохастический reverse process. DDIM переформулирует его как **детерминированный ODE**:
+
+$$
+x_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \underbrace{\frac{x_t - \sqrt{1-\bar{\alpha}_t}\,\varepsilon_\theta}{\sqrt{\bar{\alpha}_t}}}_{\hat{x}_0\text{ prediction}} + \sqrt{1-\bar{\alpha}_{t-1}}\,\varepsilon_\theta
+$$
+
+Параметр $\eta = 0$ → полностью детерминированный (DDIM). При $\eta = 1$ → обычный DDPM.
+
+### Ускорение инференса
+
+Поскольку reverse process теперь детерминированный, можно пропускать шаги — делать не 1000 шагов, а 50 или 10, напрямую перескакивая от $t$ к $t - \Delta$:
+
+```python
+@torch.no_grad()
+def ddim_sample(model, schedule, shape, n_steps=50, eta=0.0, device='cuda'):
+    """DDIM sampling: n_steps шагов вместо T=1000"""
+    # Выбираем подмножество timesteps
+    step_size = schedule.T // n_steps
+    timesteps = list(reversed(range(0, schedule.T, step_size)))
+
+    x = torch.randn(shape, device=device)
+
+    for i, t in enumerate(timesteps):
+        t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+        eps_pred = model(x, t_batch)
+
+        ab_t = schedule.alpha_bars[t]
+        ab_prev = schedule.alpha_bars[timesteps[i+1]] if i + 1 < len(timesteps) else torch.tensor(1.0)
+
+        # Предсказываем x_0
+        x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()
+        x0_pred = x0_pred.clamp(-1, 1)
+
+        # Детерминированный шаг (eta=0)
+        sigma = eta * ((1 - ab_prev) / (1 - ab_t)).sqrt() * (1 - ab_t / ab_prev).sqrt()
+        dir_xt = (1 - ab_prev - sigma**2).sqrt() * eps_pred
+        x = ab_prev.sqrt() * x0_pred + dir_xt
+
+        if eta > 0 and i < len(timesteps) - 1:
+            x += sigma * torch.randn_like(x)
+
+    return x
+```
+
+### Интерполяция в латентном пространстве
+
+Поскольку DDIM детерминирован, можно **инвертировать**: для реального изображения $x_0$ найти $x_T$ (DDIM inversion). Тогда интерполяция двух изображений в пространстве $x_T$ даёт плавный морфинг.
+
+---
+
+## 7. Score Matching и SDE-формулировка
+
+### Score Function
+
+**Score function** — это градиент логарифма плотности:
+
+$$
+s(x) = \nabla_x \log p(x)
+$$
+
+Score указывает направление наибольшего роста плотности — «где больше данных». Диффузионная модель неявно обучает аппроксимацию score функции: $\varepsilon_\theta(x_t, t) \approx -\sqrt{1-\bar{\alpha}_t} \cdot \nabla_{x_t} \log q_t(x_t)$.
+
+### SDE-формулировка (Song et al., 2021)
+
+Весь процесс диффузии можно записать как стохастическое дифференциальное уравнение (SDE):
+
+$$
+dx = f(x, t)\, dt + g(t)\, dW
+$$
+
+**Forward SDE** (добавляем шум): $f(x, t) = -\frac{\beta(t)}{2} x$, $g(t) = \sqrt{\beta(t)}$
+
+**Reverse SDE** (убираем шум): $dx = \left[f(x,t) - g(t)^2 \nabla_x \log p_t(x)\right]dt + g(t)\, d\bar{W}$
+
+Сеть $s_\theta(x, t) \approx \nabla_x \log p_t(x)$ — это и есть score network. Эта унифицированная формулировка объединяет DDPM, SMLD и другие диффузионные модели.
+
+::: {.callout-note title="Почему это важно?"}
+SDE-формулировка открыла путь к **probability flow ODE** — детерминированному аналогу reverse SDE, который лежит в основе DDIM и Flow Matching.
+:::
+
+---
+
+## 8. Latent Diffusion и Stable Diffusion
+
+### Проблема пиксельной диффузии
+
+DDPM на высоком разрешении (512×512×3) — крайне дорого. На каждом из 1000 шагов нужен проход через UNet по тензору $512 \times 512 \times 3 = 786\,432$ элементов.
+
+### Latent Diffusion Model (LDM)
+
+Rombach et al. (2022) — «High-Resolution Image Synthesis with Latent Diffusion Models» — ключевая идея:
+
+1. **Предобучаем VAE**: обучаем пару энкодер $\mathcal{E}$ / декодер $\mathcal{D}$ на изображениях. Энкодер сжимает $512 \times 512 \times 3 \to 64 \times 64 \times 4$ (сжатие в 48 раз).
+2. **Диффузия в латентном пространстве**: DDPM работает с $z = \mathcal{E}(x)$, а не с $x$.
+3. **Декодирование**: $\hat{x} = \mathcal{D}(\hat{z}_0)$ — одним проходом через декодер VAE.
+
+Это в 4–8 раз дешевле при сопоставимом качестве.
+
+### UNet-архитектура для диффузии
+
+UNet состоит из:
+- **Encoder** (downsampling): ResNet блоки + Attention
+- **Bottleneck**: Transformer блоки
+- **Decoder** (upsampling): ResNet блоки + Attention + skip connections
+
+```python
+# Упрощённый residual block с timestep conditioning
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, time_dim):
+        super().__init__()
+        self.conv1 = nn.Sequential(nn.GroupNorm(8, in_ch), nn.SiLU(), nn.Conv2d(in_ch, out_ch, 3, padding=1))
+        self.time_proj = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_ch))
+        self.conv2 = nn.Sequential(nn.GroupNorm(8, out_ch), nn.SiLU(), nn.Conv2d(out_ch, out_ch, 3, padding=1))
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, t_emb):
+        h = self.conv1(x)
+        h = h + self.time_proj(t_emb)[:, :, None, None]  # инжект timestep
+        h = self.conv2(h)
+        return h + self.skip(x)
+```
+
+### CLIP-кондиционирование
+
+Для текстового управления Stable Diffusion использует **CLIP text encoder**: текст → вектор → через cross-attention в UNet. На каждом слое UNet:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right)V
+$$
+
+$Q = W_Q h_{\text{spatial}}$ (из UNet), $K = W_K c_{\text{text}},\, V = W_V c_{\text{text}}$ (из CLIP).
+
+---
+
+## 9. Classifier-Free Guidance
+
+### Проблема: качество vs. разнообразие
+
+Кондиционированная модель $p_\theta(x|\text{cond})$ при наивном сэмплинге даёт «среднее» — размытые, не очень реалистичные результаты. Нужен механизм, «толкающий» сэмплы к высококачественным примерам.
+
+### Classifier Guidance (устаревший подход)
+
+Модифицируем score функцию через внешний классификатор $p_\phi(c|x_t)$:
+
+$$
+\tilde{s}_\theta(x_t, t, c) = s_\theta(x_t, t, c) + w \cdot \nabla_{x_t} \log p_\phi(c|x_t)
+$$
+
+Проблема: нужен отдельный шумоустойчивый классификатор.
+
+### Classifier-Free Guidance (CFG)
+
+Ho & Salimans (2022) — во время обучения случайно обнуляем условие (с вероятностью $p_{\text{uncond}} \approx 0.1$):
+
+$$
+\tilde{\varepsilon}_\theta(x_t, t, c) = \varepsilon_\theta(x_t, t, \varnothing) + w \cdot \left[\varepsilon_\theta(x_t, t, c) - \varepsilon_\theta(x_t, t, \varnothing)\right]
+$$
+
+На инференсе нужен **двойной форвард-пасс**: один с условием $c$, другой без ($\varnothing$). Guidance scale $w$ контролирует трейдофф:
+
+| $w$ | Эффект |
+|---|---|
+| $w = 0$ | Нет guidance, максимальное разнообразие |
+| $w = 1$ | Стандартная кондиционированная модель |
+| $w = 7{-}15$ | Типичное значение для SD: высокое качество |
+| $w \gg 15$ | Пересатурация, артефакты |
+
+```python
+@torch.no_grad()
+def cfg_sample(model, schedule, prompt_emb, n_steps=50, guidance_scale=7.5, device='cuda'):
+    """Classifier-Free Guidance sampling"""
+    batch_size = prompt_emb.size(0)
+    shape = (batch_size, 4, 64, 64)  # latent space для 512x512
+    x = torch.randn(shape, device=device)
+
+    # null embedding (пустой текст)
+    null_emb = torch.zeros_like(prompt_emb)
+
+    step_size = schedule.T // n_steps
+    timesteps = list(reversed(range(0, schedule.T, step_size)))
+
+    for t in timesteps:
+        t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
+
+        # Двойной форвард-пасс
+        eps_cond = model(x, t_batch, prompt_emb)      # с условием
+        eps_uncond = model(x, t_batch, null_emb)      # без условия
+
+        # Линейная интерполяция
+        eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+        # DDIM шаг с откорректированным eps
+        ab_t = schedule.alpha_bars[t]
+        x0_pred = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
+        x0_pred = x0_pred.clamp(-1, 1)
+
+        if t > 0:
+            ab_prev = schedule.alpha_bars[t - step_size] if t >= step_size else torch.tensor(1.0)
+            x = ab_prev.sqrt() * x0_pred + (1 - ab_prev).sqrt() * eps
+        else:
+            x = x0_pred
+
+    return x
+```
+
+---
+
+## 10. Flow Matching: современная альтернатива DDPM
+
+### Continuous Normalizing Flows (CNF)
+
+Flow Matching (Lipman et al., 2022; Liu et al., 2022) — другая парадигма: вместо стохастического диффузионного процесса строим **детерминированный поток** (ODE) из шумового распределения $p_0 = \mathcal{N}(0, I)$ в распределение данных $p_1$.
+
+Поток задаётся ODE:
+
+$$
+\frac{dx}{dt} = v_\theta(x, t), \quad x(0) \sim p_0, \quad x(1) \sim p_1
+$$
+
+Нейросеть $v_\theta$ учится векторному полю скорости (velocity field).
+
+### Flow Matching Objective
+
+Напрямую обучать поле скоростей через маргинальный путь сложно. Lipman et al. показали, что можно учить **условный** поток (conditioned on $x_1$):
+
+$$
+\mathcal{L}_{\text{FM}} = \mathbb{E}_{t,\, x_1 \sim p_1,\, x_0 \sim p_0}\left[\left\|v_\theta(x_t, t) - (x_1 - x_0)\right\|^2\right]
+$$
+
+где $x_t = (1-t)\, x_0 + t\, x_1$ — **прямолинейный путь** между шумом и данными.
+
+::: {.callout-tip title="Flow Matching vs DDPM: в чём выигрыш?"}
+1. **Прямолинейные пути**: нейросети проще учить прямые траектории, чем изогнутые диффузионные пути
+2. **Меньше шагов на инференсе**: прямые пути = можно идти крупными шагами, 10–20 vs 1000
+3. **Более простая теория**: просто ODE, не SDE с Ланжевеновой динамикой
+4. **Лучше масштабируется**: Stable Diffusion 3 и Flux используют Flow Matching
+:::
+
+### Связь с DDPM
+
+Flow Matching — это частный случай CNF. DDPM с probability flow ODE — тоже CNF, но с изогнутыми путями. Flow Matching с прямолинейными путями (Rectified Flow) = более простая и эффективная версия.
+
+```python
+class FlowMatchingTrainer:
+    def __init__(self, model):
+        self.model = model  # v_theta(x_t, t) → velocity
+
+    def loss(self, x1):
+        """Flow Matching loss: учим прямолинейные потоки"""
+        batch = x1.size(0)
+        t = torch.rand(batch, device=x1.device)  # t ~ Uniform[0, 1]
+        x0 = torch.randn_like(x1)               # шум
+
+        # Линейная интерполяция: прямолинейный путь
+        x_t = (1 - t[:, None, None, None]) * x0 + t[:, None, None, None] * x1
+
+        # Целевое поле скоростей: просто (x1 - x0)
+        target_velocity = x1 - x0
+
+        # Предсказываем поле скоростей
+        pred_velocity = self.model(x_t, t)
+
+        return nn.functional.mse_loss(pred_velocity, target_velocity)
+
+    @torch.no_grad()
+    def sample(self, shape, n_steps=20, device='cuda'):
+        """ODE solver: Euler method"""
+        x = torch.randn(shape, device=device)
+        dt = 1.0 / n_steps
+
+        for i in range(n_steps):
+            t = torch.full((shape[0],), i / n_steps, device=device)
+            v = self.model(x, t)
+            x = x + dt * v  # Euler step
+
+        return x
+```
+
+---
+
+## 11. Сравнение методов
+
+| Метод | ELBO? | Детерм.? | Шагов | Качество | Применение |
+|---|---|---|---|---|---|
+| **VAE** | Да | Да | 1 | Среднее | Latent repr., молекулы |
+| **β-VAE** | Да | Да | 1 | Ниже VAE | Disentanglement |
+| **GAN** | Нет | Да | 1 | Высокое | Лица, суперрезолюция |
+| **DDPM** | Нет | Нет | 1000 | SOTA | Text-to-image |
+| **DDIM** | Нет | Да | 20–50 | SOTA | Ускоренный DDPM |
+| **Flow Matching** | Нет | Да | 10–20 | SOTA+ | SD3, Flux |
+
+---
+
+## Что делать дальше
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([basic](../../seminars/08-generative/basic.html) / [advanced](../../seminars/08-generative/advanced.html)): В basic мы собираем VAE на MNIST, играем с $\beta$-VAE и латентным пространством. В advanced — пишем микро-DDPM.
-- **ДЗ**: [08-generative](../../homework/08-generative/README.qmd) — Обучение VAE, исследование латентного пространства, интерполяция и детальный анализ (Judge only).
+- **Семинар** ([basic](../../seminars/08-generative/basic.html) / [advanced](../../seminars/08-generative/advanced.html)): в basic — VAE на MNIST, игры с $\beta$ и латентным пространством; в advanced — micro-DDPM на CIFAR-10, DDIM sampling.
+- **ДЗ**: [08-generative](../../homework/08-generative/README.qmd) — обучение VAE, исследование латентного пространства, интерполяция.
 :::
 
 ::: {.callout-important title="Минимум на запоминание"}
-1. VAE учится максимизировать ELBO = Reconstruction - KL.
-2. Reparameterization trick необходим для градиентного спуска сквозь сэмплирование.
-3. Диффузия состоит из фиксированного Forward (добавление шума) и обучаемого Reverse (удаление шума) процессов.
-4. Модели диффузии обычно предсказывают добавленный шум (noise-prediction).
+1. **VAE ELBO**: $\mathcal{L} = \mathbb{E}_q[\log p(x|z)] - D_{\mathrm{KL}}(q(z|x) \| p(z))$ — reconstruction минус KL-регуляризация.
+2. **Reparameterization trick**: $z = \mu + \sigma \odot \varepsilon$, $\varepsilon \sim \mathcal{N}(0,I)$ — делает сэмплирование дифференцируемым.
+3. **β-VAE**: умножаем KL на $\beta > 1$ → disentangled латентное пространство.
+4. **DDPM forward**: $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon$ — сэмпл в любой момент без итераций.
+5. **DDPM training**: предсказываем добавленный шум $\varepsilon$, MSE loss.
+6. **DDIM**: детерминированный reverse process → 50 шагов вместо 1000, инверсия возможна.
+7. **Latent Diffusion**: диффузия в сжатом пространстве VAE — дешевле в 48× при сопоставимом качестве.
+8. **CFG**: $\tilde{\varepsilon} = \varepsilon_\varnothing + w(\varepsilon_c - \varepsilon_\varnothing)$ — двойной форвард, $w \approx 7{-}15$.
+9. **Flow Matching**: прямолинейный путь $x_t = (1-t)x_0 + tx_1$, цель — поле скоростей $(x_1 - x_0)$.
 :::
+
+---
 
 ## Литература {.appendix}
 

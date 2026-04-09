@@ -1,67 +1,552 @@
 ---
-title: "Лекция: NLP и LLMs — от токенизации до агентов"
-subtitle: "Optional Track: nlp-llm"
-author: "ml3-neo"
+title: "NLP & Large Language Models"
+subtitle: "Optional Track: от токенизации до агентов — архитектуры, scaling, RLHF, RAG"
 date: last-modified
 bibliography: ../../../refs.bib
 format:
   html:
+    toc: true
+    toc-depth: 3
     code-fold: false
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это **optional track** по современным NLP моделям и LLM. Предполагается знакомство с архитектурой Transformer (модуль 06).
+Это **optional track** по NLP и LLM. Предполагается знакомство с архитектурой Transformer (модуль 06) — self-attention, positional encoding, encoder/decoder. Трек ~55 минут.
 :::
 
-::: {.level-toggle}
-[advanced](../../../seminars/tracks/nlp-llm/advanced.html){.active}
+## 1. Токенизация
+
+Языковые модели не работают с символами или целыми словами напрямую — они используют **subword** токенизацию: компромисс между character-level (слишком длинные последовательности) и word-level (огромный словарь, проблема редких слов).
+
+### 1.1 BPE (Byte-Pair Encoding)
+
+Используется в GPT-2, GPT-3, GPT-4, Llama, Mistral.
+
+**Алгоритм обучения:**
+1. Инициализируем словарь: все отдельные байты (256 символов)
+2. Подсчитываем частоту всех соседних пар в корпусе
+3. Самую частую пару объединяем в новый токен, добавляем в словарь
+4. Повторяем шаги 2–3 до нужного размера словаря
+
+```python
+# Упрощённый BPE training
+from collections import Counter
+
+def get_pairs(vocab):
+    pairs = Counter()
+    for word, freq in vocab.items():
+        symbols = word.split()
+        for i in range(len(symbols) - 1):
+            pairs[(symbols[i], symbols[i+1])] += freq
+    return pairs
+
+def merge_vocab(pair, vocab):
+    new_vocab = {}
+    bigram = ' '.join(pair)
+    replacement = ''.join(pair)
+    for word, freq in vocab.items():
+        new_word = word.replace(bigram, replacement)
+        new_vocab[new_word] = freq
+    return new_vocab
+
+# Начальный словарь: слова разбиты на символы
+vocab = {'l o w </w>': 5, 'l o w e r </w>': 2, 'n e w e s t </w>': 6}
+for _ in range(10):
+    pairs = get_pairs(vocab)
+    best = max(pairs, key=pairs.get)
+    vocab = merge_vocab(best, vocab)
+```
+
+**Inference**: словарь фиксирован после обучения. Для нового слова применяем выученные merge правила в том же порядке — жадно.
+
+### 1.2 WordPiece
+
+Используется в BERT, DistilBERT.
+
+Отличие от BPE: при каждом слиянии максимизируем **likelihood** языковой модели, а не частоту пары:
+
+$$\text{score}(AB) = \frac{\text{freq}(AB)}{\text{freq}(A) \cdot \text{freq}(B)}$$
+
+Это фактически pointwise mutual information — выбираем пары, которые встречаются вместе значительно чаще, чем по отдельности.
+
+Токены субслова маркируются `##`: `"playing"` → `["play", "##ing"]`.
+
+### 1.3 Unigram Language Model
+
+Используется в SentencePiece (T5, mBART, Llama-2 с SentencePiece вместо tiktoken).
+
+В отличие от BPE (bottom-up), Unigram **начинает с большого словаря** и итеративно удаляет токены, которые меньше всего ухудшают likelihood.
+
+Для токенизации новой строки: Viterbi-декодинг для нахождения наиболее вероятного разбиения:
+
+$$P(\mathbf{x}) = \prod_{i} P(x_i), \quad x^* = \arg\max P(\mathbf{x})$$
+
+### 1.4 SentencePiece и tiktoken
+
+**SentencePiece** (Google): unigram или BPE, работает с сырым текстом без предварительной токенизации по пробелам. Пробел кодируется специальным символом `▁`. Идеален для многоязычных моделей.
+
+**tiktoken** (OpenAI): BPE на уровне байтов (byte-level BPE). Нет проблем с Unicode — любая строка токенизируется. GPT-4 Turbo использует `cl100k_base` — 100k токенов.
+
+### 1.5 Трейдоффы
+
+| Параметр | Больше токенов | Меньше токенов |
+|----------|---------------|---------------|
+| Vocab size | Меньше ↓ | Больше ↑ |
+| Seq length | Длиннее ↑ | Короче ↓ |
+| Память контекста | Меньше | Больше |
+| Редкие языки | Хуже | Лучше |
+
+::: {.callout-note}
+Русский текст в среднем требует в ~1.5–2 раза больше токенов, чем эквивалентный английский, в моделях с преимущественно английским словарём — это прямо влияет на стоимость API.
 :::
 
-## 1. Tokenization
+---
 
-Современные языковые модели не работают с буквами или словами напрямую. Они используют subword-токенизацию:
-- **BPE (Byte-Pair Encoding)**: итеративно сливает самые частые пары байтов/символов в один токен (GPT-2, GPT-3, Llama).
-- **WordPiece**: похож на BPE, но на каждом шаге выбирает пару для слияния, максимизирующую правдоподобие (BERT).
-- **SentencePiece**: обрабатывает текст как сырой поток символов, включая пробелы (T5, ALBERT).
+## 2. Scaling Laws
 
-Трейдоффы: размер словаря (vocab size) vs длина последовательности (sequence length).
+### 2.1 Kaplan et al. (2020) — OpenAI
 
-## 2. GPT Архитектура
+Первые систематические законы масштабирования для Transformer LM. Ключевые находки:
 
-- **Causal LM (Autoregressive Generation)**: предсказание следующего токена при условии всех предыдущих.
-- **KV-Cache**: кеширование Key и Value матриц предыдущих токенов во время генерации, чтобы не пересчитывать их на каждом шаге $O(N^2) \to O(N)$. Это критически важно для быстрой работы LLM.
+$$L(N) \approx \left(\frac{N_c}{N}\right)^{\alpha_N}, \quad L(D) \approx \left(\frac{D_c}{D}\right)^{\alpha_D}$$
 
-## 3. Scaling Laws
+где $N$ — параметры модели, $D$ — токены обучения, $\alpha_N \approx 0.076$, $\alpha_D \approx 0.095$.
 
-Эмпирические законы масштабирования:
-- Зависимость Loss от количества параметров $N$ и размера датасета $D$.
-- **Chinchilla optimal**: для оптимального обучения размер модели и объем данных должны расти пропорционально. На 1 параметр $\approx 20$ токенов.
-- **Emergent abilities**: новые навыки модели (например, few-shot reasoning), которые появляются только при достижении определенного масштаба.
+**Важный вывод**: при фиксированном вычислительном бюджете $C \approx 6ND$ (FLOP на одном токене) — оптимально **масштабировать модель** сильнее, чем данные.
+
+### 2.2 Chinchilla (Hoffmann et al., 2022) — DeepMind
+
+Повторили эксперименты Kaplan более строго и обнаружили: Kaplan недооценил важность данных.
+
+**Chinchilla-optimal правило**: при compute budget $C$ (FLOP) оптимальное соотношение
+
+$$N_\text{opt} \propto C^{0.5}, \quad D_\text{opt} \propto C^{0.5}$$
+
+То есть модель и данные должны расти **пропорционально**. Для оптимальной модели: **~20 токенов на каждый параметр**.
+
+Пример: GPT-3 (175B параметров, 300B токенов) — сильно недообучен по данным. Chinchilla-optimal для того же compute: ~70B параметров, ~1.4T токенов → и правда вышел Chinchilla (70B, 1.4T) с лучшим качеством.
+
+::: {.callout-tip}
+Практический вывод: если вы обучаете модель для инференса (не исследовательский, а продакшен), то **меньшая модель на большем корпусе** выгоднее: она быстрее при инференсе при том же качестве.
+:::
+
+### 2.3 Законы за пределами Chinchilla
+
+Llama (1/2/3) и Mistral намеренно нарушают Chinchilla-optimal: они обучаются на **значительно большем количестве токенов** (Llama-3 70B: ~15T токенов против ~1.4T chinchilla-optimal). Почему? Стоимость инференса доминирует над стоимостью обучения — выгоднее обучать дольше.
+
+---
+
+## 3. GPT Архитектура
+
+### 3.1 Decoder-only Transformer
+
+GPT — **decoder-only**: только слои self-attention с **causal mask** (треугольная маска, запрещающая attention вперёд во времени).
+
+```
+Input tokens: [t₁, t₂, t₃, t₄]
+Causal mask:
+  t₁ может видеть: t₁
+  t₂ может видеть: t₁, t₂
+  t₃ может видеть: t₁, t₂, t₃
+  t₄ может видеть: t₁, t₂, t₃, t₄
+```
+
+В матричном виде: перед softmax прибавляем $-\infty$ к верхнетреугольной части матрицы attention scores.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+import math
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, d_model, n_heads, max_len=2048):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head  = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        # Causal mask: регистрируем как buffer (не параметр)
+        mask = torch.tril(torch.ones(max_len, max_len)).view(1, 1, max_len, max_len)
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        Q, K, V = self.qkv(x).chunk(3, dim=-1)
+        # Reshape: [B, T, C] -> [B, n_heads, T, d_head]
+        def reshape(t):
+            return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        Q, K, V = reshape(Q), reshape(K), reshape(V)
+
+        scale = math.sqrt(self.d_head)
+        scores = (Q @ K.transpose(-2, -1)) / scale               # [B, H, T, T]
+        scores = scores.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
+        attn   = F.softmax(scores, dim=-1)
+        out    = (attn @ V).transpose(1, 2).contiguous().view(B, T, C)
+        return self.proj(out)
+```
+
+### 3.2 Weight Tying
+
+В GPT **Input Embedding** и **Output Projection** (lm_head) делят одну матрицу весов $W_e \in \mathbb{R}^{V \times d}$:
+
+```python
+model.transformer.wte.weight = model.lm_head.weight  # они одинаковые
+```
+
+Это:
+- Экономит $V \times d$ параметров (для GPT-2: 50k × 768 = ~38M)
+- Дает семантическое согласование: похожие токены — близкие векторы на входе и выходе
+- Эмпирически улучшает обучение
+
+### 3.3 KV-Cache во время инференса
+
+При **autoregressive generation** (генерируем по одному токену) без кэша — каждый раз пересчитываем attention для всей последовательности:
+
+- Шаг $t$: вычисляем $K, V$ для токенов $1..t$ → $O(t)$ операций
+- Итого за $T$ токенов: $O(T^2)$
+
+**С KV-Cache**: сохраняем $K, V$ для всех предыдущих токенов:
+
+- Шаг $t$: вычисляем $Q, K, V$ только для нового токена, конкатенируем с кэшем
+- Итого: $O(T)$ вычислений, $O(T \cdot d)$ памяти
+
+```python
+class GPTWithCache(nn.Module):
+    def generate(self, input_ids, max_new_tokens=100, temperature=1.0):
+        past_kv = None  # кэш
+        for _ in range(max_new_tokens):
+            logits, past_kv = self(input_ids, past_kv=past_kv)
+            # берём только последний токен
+            next_logits = logits[:, -1, :] / temperature
+            probs = F.softmax(next_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            input_ids = next_token  # только новый токен в следующем шаге!
+            if next_token.item() == EOS_TOKEN_ID:
+                break
+        return input_ids
+```
+
+KV-cache — ключевая оптимизация для вывода: без неё GPT-3 не мог бы отвечать в реальном времени.
+
+---
 
 ## 4. RLHF и Alignment
 
-- **Reward Model**: обучается на человеческих предпочтениях (Human Preference Data).
-- **PPO для LLM**: Proximal Policy Optimization используется для тонкой настройки генератора (Policy) так, чтобы максимизировать Reward и не сильно отдаляться от базовой модели (через KL-дивергенцию).
-- **RLAIF**: использование других AI для разметки предпочтений вместо людей (AI Feedback).
+### 4.1 Зачем нужен Alignment
+
+Pretrained LLM — модель **предсказания следующего токена** на интернет-тексте. Она может:
+- Продолжить вопрос как если бы сама придумала ещё вопросов (вместо ответа)
+- Генерировать вредный или нечестный контент
+- Следовать форматированию в стиле форумного поста, а не ассистента
+
+RLHF (Reinforcement Learning from Human Feedback) — основной метод для обучения моделей-ассистентов.
+
+### 4.2 SFT (Supervised Fine-Tuning)
+
+Шаг 1: дообучаем pretrained модель на примерах (вопрос → правильный ответ) от экспертов. Обычно 10k–100k примеров. Это учит модель **формату** и **базовому поведению** ассистента.
+
+### 4.3 Reward Model
+
+Шаг 2: обучаем отдельную модель $r_\phi(x, y)$ предсказывать качество ответа $y$ на вопрос $x$.
+
+**Данные**: аннотаторы ранжируют несколько ответов на один вопрос: $y_w \succ y_l$ (winner vs loser).
+
+**Loss** (Bradley-Terry предпочтения):
+
+$$\mathcal{L}(\phi) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\left(r_\phi(x, y_w) - r_\phi(x, y_l)\right)\right]$$
+
+### 4.4 PPO для LLM
+
+Шаг 3: дообучаем SFT-модель как политику $\pi_\theta$ максимизировать reward при ограничении: не отдаляться от SFT слишком сильно.
+
+$$\mathcal{L}_\text{RLHF} = \mathbb{E}\left[r_\phi(x, y) - \beta\,\text{KL}\!\left(\pi_\theta(y|x) \;\|\; \pi_\text{SFT}(y|x)\right)\right]$$
+
+KL-дивергенция штрафует за «сдрейфование» от базовой модели — без неё модель быстро коллапсирует к вырожденным ответам, максимизирующим reward формально (reward hacking).
+
+### 4.5 DPO (Direct Preference Optimization)
+
+Более простой метод: оказывается, оптимальную политику при RLHF можно выразить аналитически, и тогда задача сводится к **прямой оптимизации** на preference-парах:
+
+$$\mathcal{L}_\text{DPO}(\theta) = -\mathbb{E}_{(x,y_w,y_l)}\left[\log\sigma\!\left(\beta\log\frac{\pi_\theta(y_w|x)}{\pi_\text{ref}(y_w|x)} - \beta\log\frac{\pi_\theta(y_l|x)}{\pi_\text{ref}(y_l|x)}\right)\right]$$
+
+DPO **не требует отдельного reward model и RL-цикла** — это обычная supervised loss на парах. Проще реализовать и стабилизировать.
+
+```python
+from trl import DPOTrainer, DPOConfig
+
+config = DPOConfig(
+    beta=0.1,          # KL-coefficient
+    max_length=512,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+)
+trainer = DPOTrainer(
+    model=model,
+    ref_model=ref_model,   # SFT checkpoint (frozen)
+    args=config,
+    train_dataset=dataset, # {"prompt", "chosen", "rejected"}
+)
+trainer.train()
+```
+
+---
 
 ## 5. RAG (Retrieval-Augmented Generation)
 
-- Извлечение информации из внешней базы знаний для дополнения контекста LLM.
-- **Chunking**: нарезка текста на фрагменты (overlap, sentence splitting).
-- **Embedding similarity**: поиск ближайших фрагментов с помощью косинусного расстояния между векторами (например, через FAISS).
+### 5.1 Мотивация
+
+LLM ограничены:
+- **Дата отсечки** (knowledge cutoff) — не знают свежих событий
+- **Галлюцинации** — придумывают факты с уверенным видом
+- **Объём знаний** — не могут уместить в параметрах корпоративную базу знаний
+
+RAG: при ответе на вопрос **сначала ищем** релевантные документы, затем даём их в контекст LLM.
+
+### 5.2 Этапы RAG-пайплайна
+
+**Подготовка (offline):**
+1. **Chunking**: разбиваем документы на фрагменты (~512 токенов, с overlap ~50 токенов)
+2. **Embedding**: пропускаем каждый чанк через embedding model → вектор $\in \mathbb{R}^d$
+3. **Indexing**: сохраняем векторы в vector DB (FAISS, Chroma, Pinecone)
+
+**Inference (online):**
+1. Вопрос пользователя → embed
+2. **ANN search**: находим top-k ближайших чанков по косинусному similarity
+3. Вставляем чанки в prompt: `"Context: {chunks}\n\nQuestion: {question}\nAnswer:"`
+4. LLM генерирует ответ
+
+### 5.3 Реализация с LangChain
+
+```python
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import TextLoader
+
+# 1. Загрузка и разбивка документов
+loader = TextLoader("knowledge_base.txt")
+docs = loader.load()
+splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
+chunks = splitter.split_documents(docs)
+
+# 2. Создание embeddings и векторного хранилища
+embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+vectorstore = Chroma.from_documents(chunks, embedder, persist_directory="./chroma_db")
+
+# 3. Retrieval
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+# 4. RAG pipeline
+from langchain.chains import RetrievalQA
+from langchain.llms import Ollama
+
+llm = Ollama(model="llama3")
+qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
+answer = qa.run("Какой дедлайн у ДЗ 3?")
+```
+
+### 5.4 Векторная база FAISS
+
+```python
+import faiss
+import numpy as np
+
+d = 384  # размерность embedding
+index = faiss.IndexFlatIP(d)  # Inner Product ≈ cosine при L2-нормализации
+
+# Добавляем векторы
+embeddings = np.random.randn(1000, d).astype(np.float32)
+faiss.normalize_L2(embeddings)
+index.add(embeddings)
+
+# Поиск
+query = np.random.randn(1, d).astype(np.float32)
+faiss.normalize_L2(query)
+scores, indices = index.search(query, k=5)
+```
+
+---
 
 ## 6. Agents и Tool Use
 
-- **Function Calling**: модель обучена генерировать JSON-структуры с аргументами функций.
-- **ReAct framework (Reason + Act)**: модель пишет мысли (Thought), вызывает инструменты (Action), получает результат (Observation) и так по циклу.
+### 6.1 Agentic Loop
 
-## 7. Практика
+Агент — LLM, который итеративно рассуждает и вызывает инструменты:
 
-В `transformers` от HuggingFace:
-- `pipeline("text-generation", model=...)`
-- Параметры `generate()`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.
+```
+User Input
+    ↓
+[LLM: Think + choose action]
+    ↓
+[Tool: execute, get result]
+    ↓
+[LLM: analyze result, choose next action]
+    ↓
+... (repeat until done)
+    ↓
+Final Answer
+```
+
+### 6.2 Function Calling (OpenAI / HuggingFace)
+
+```python
+import json
+from openai import OpenAI
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "City name"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["city"]
+        }
+    }
+}]
+
+client = OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Какая погода в Москве?"}],
+    tools=tools,
+    tool_choice="auto",
+)
+
+if response.choices[0].message.tool_calls:
+    tool_call = response.choices[0].message.tool_calls[0]
+    args = json.loads(tool_call.function.arguments)
+    # Вызываем реальную функцию
+    result = get_weather(**args)
+    # Отправляем результат обратно
+```
+
+### 6.3 ReAct Framework
+
+ReAct (Reasoning + Acting) — промпт-паттерн для агентов:
+
+```
+Thought: Мне нужно найти погоду в Москве.
+Action: search[погода Москва сегодня]
+Observation: +12°C, облачно, ветер 5 м/с
+
+Thought: Теперь у меня есть данные, могу ответить.
+Action: finish[В Москве сегодня +12°C, облачно]
+```
+
+Это структурирует рассуждение: мысль → действие → наблюдение. LLM не «телепортируется» к ответу, а шаг за шагом.
+
+---
+
+## 7. Практика: HuggingFace Transformers
+
+### 7.1 Генерация текста
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+model_name = "meta-llama/Llama-3.2-1B-Instruct"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+)
+
+messages = [
+    {"role": "system", "content": "Ты полезный ассистент."},
+    {"role": "user", "content": "Объясни KV-cache в двух предложениях."},
+]
+input_ids = tokenizer.apply_chat_template(messages, return_tensors="pt").to("cuda")
+
+with torch.no_grad():
+    output = model.generate(
+        input_ids,
+        max_new_tokens=200,
+        temperature=0.7,        # ниже → детерминированнее
+        top_p=0.9,              # nucleus sampling
+        top_k=50,               # ограничение числа токенов
+        do_sample=True,
+        repetition_penalty=1.1,
+    )
+
+response = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
+print(response)
+```
+
+### 7.2 Стратегии семплинга
+
+| Метод | Описание | Когда |
+|-------|----------|-------|
+| **Greedy** | argmax на каждом шаге | Детерминированный вывод |
+| **Temperature** | Масштабирует logits: $p \propto \exp(z/T)$ | $T<1$: консервативнее, $T>1$: случайнее |
+| **Top-K** | Семплируем из K наиболее вероятных токенов | Ограничивает «хвост» |
+| **Top-P (Nucleus)** | Берём минимальный набор токенов с суммарной вероятностью $\geq p$ | Адаптивный K |
+| **Beam Search** | Несколько параллельных «лучей» | Переводы, структурированный вывод |
+
+**Temperature** детально:
+
+$$p_i = \frac{\exp(z_i / T)}{\sum_j \exp(z_j / T)}$$
+
+При $T \to 0$: greedy. При $T \to \infty$: равномерное распределение. Типичные значения: 0.6–0.9 для чата, 0.0 для фактических вопросов.
+
+### 7.3 Ollama для локального запуска
+
+```bash
+# Установка и запуск
+ollama run llama3.2:1b
+ollama run mistral:7b
+ollama run qwen2.5:7b
+```
+
+```python
+import ollama
+
+response = ollama.chat(
+    model='llama3.2',
+    messages=[{'role': 'user', 'content': 'Что такое attention?'}]
+)
+print(response['message']['content'])
+
+# Streaming
+for chunk in ollama.chat(model='llama3.2', messages=messages, stream=True):
+    print(chunk['message']['content'], end='', flush=True)
+```
+
+### 7.4 vLLM для высокопроизводительного инференса
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(model="meta-llama/Llama-3.2-8B-Instruct", dtype="bfloat16")
+params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=512)
+
+prompts = ["Объясни квантизацию нейросетей", "Что такое RAG?"]
+outputs = llm.generate(prompts, params)
+for o in outputs:
+    print(o.outputs[0].text)
+```
+
+vLLM использует **PagedAttention** — управление KV-кэшем через страничную память. Это позволяет обрабатывать множество запросов параллельно без wasteful padding, достигая в 10–30× больше throughput чем naive HuggingFace.
+
+---
+
+## Итоги
+
+1. **Токенизация**: BPE (GPT), WordPiece (BERT), Unigram/SentencePiece (T5, Llama-2). Ключевой трейдофф: vocab size vs sequence length
+2. **Scaling Laws**: Kaplan (2020) — масштабируй модель; Chinchilla (2022) — ~20 токенов/параметр оптимально
+3. **GPT**: decoder-only, causal mask, weight tying, KV-cache критичен для быстрого инференса
+4. **RLHF**: SFT → Reward Model → PPO с KL-штрафом; DPO — упрощение без отдельного RM и RL
+5. **RAG**: chunk → embed → FAISS → augmented prompt; устраняет hallucinations для фактических вопросов
+6. **Agents**: function calling + ReAct loop; модель итеративно планирует и действует
+
+---
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар** ([advanced](../../../seminars/tracks/nlp-llm/advanced.html)): реализация BPE и демонстрация KV-cache trick.
-- **ДЗ**: [nlp-llm](../../../homework/tracks/nlp-llm/README.qmd) — построить RAG систему и исследовать параметры retrieval.
+- **Семинар** ([advanced](../../../seminars/tracks/nlp-llm/advanced.html)): реализация BPE с нуля, демонстрация KV-cache trick, построение минимального RAG на FAISS.
+- **ДЗ**: [nlp-llm](../../../homework/tracks/nlp-llm/README.qmd) — построить RAG-систему для корпуса документов, исследовать влияние chunk size и числа retrieved docs на качество ответов.
 :::

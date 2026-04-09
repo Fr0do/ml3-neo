@@ -8,47 +8,105 @@ channels = ["conda-forge", "pytorch", "nvidia"]
 # Если нужен Intel mac — закрепите torch == 2.4.* и верните "osx-64".
 platforms = ["linux-64", "osx-arm64", "win-64"]
 
+# ---------------------------------------------------------------------------
+# Задачи (pixi run <task>)
+# ---------------------------------------------------------------------------
 [tasks]
-preview      = "quarto preview"
-render       = "quarto render"
-lecture      = { cmd = "quarto preview lectures/$MODULE/lecture.qmd", env = { MODULE = "04-cnn" } }
-seminar      = { cmd = "marimo edit seminars/$MODULE/$LEVEL.py", env = { MODULE = "04-cnn", LEVEL = "basic" } }
-hw           = { cmd = "marimo edit homework/$HW/starter.py", env = { HW = "04-cnn-zoo" } }
-grade        = { cmd = "ml3 grade both $HW", env = { HW = "04-cnn-zoo" } }
-tikz         = "python figures/render.py"
-tikz-all     = "python figures/render.py --all"
-test         = "pytest grader/tests"
+preview          = "quarto preview"
+render           = "quarto render"
+lecture          = { cmd = "quarto preview lectures/$MODULE/lecture.qmd", env = { MODULE = "04-cnn" } }
+seminar          = { cmd = "marimo edit seminars/$MODULE/$LEVEL.py", env = { MODULE = "04-cnn", LEVEL = "basic" } }
+hw               = { cmd = "marimo edit homework/$HW/starter.py", env = { HW = "04-cnn-zoo" } }
+grade            = { cmd = "ml3 grade both $HW", env = { HW = "04-cnn-zoo" } }
+tikz             = "python figures/render.py"
+tikz-all         = "python figures/render.py --all"
+export-seminars  = "python scripts/export_seminars.py"
+test             = "pytest grader/tests"
+# Проверка флэш-аттеншн и окружения GPU
+check-env        = "python -c \"import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}, devices={torch.cuda.device_count()}')\""
 
+# ---------------------------------------------------------------------------
+# Conda-зависимости (системные + CUDA runtime)
+# ---------------------------------------------------------------------------
 [dependencies]
-python      = ">=3.11,<3.13"
-pip         = "*"
-numpy       = ">=2.0"
-scipy       = "*"
-matplotlib  = "*"
-pandas      = "*"
-scikit-learn = "*"
-opencv      = "*"
-albumentations = "*"
-tqdm        = "*"
-ipywidgets  = "*"
-quarto      = "*"
-tectonic    = "*"
-poppler     = "*"  # даёт pdftocairo -svg, универсально доступен
-pyyaml      = "*"
-typer       = "*"
-rich        = "*"
-pytest      = "*"
-jupyter     = "*"
-nbformat    = "*"
-nbclient    = "*"
-ipykernel   = "*"
+python        = ">=3.11,<3.13"
+pip           = "*"
+# Численные и научные
+numpy         = ">=2.0"
+scipy         = "*"
+pandas        = ">=2.2"
+scikit-learn  = ">=1.5"
+# Визуализация
+matplotlib    = ">=3.9"
+seaborn       = "*"
+plotly        = ">=5.22"
+# Компьютерное зрение
+opencv        = ">=4.10"
+albumentations = ">=1.4"
+pillow        = ">=10"
+# Утилиты
+tqdm          = "*"
+ipywidgets    = ">=8"
+pyyaml        = ">=6"
+typer         = ">=0.12"
+rich          = ">=13"
+# Инструменты курса
+quarto        = ">=1.5"
+tectonic      = "*"
+poppler       = "*"   # pdftocairo → SVG
+# Тестирование и ноутбуки
+pytest        = ">=8"
+jupyter       = "*"
+nbformat      = "*"
+nbclient      = "*"
+ipykernel     = "*"
 jupyter-cache = "*"
+# Системные для CUDA-сборок (только linux/win)
+# cudatoolkit и cuda-nvcc ставятся автоматически через pytorch-канал
 
+# ---------------------------------------------------------------------------
+# PyPI-зависимости (всё, что связано с DL + Marimo + HuggingFace)
+# ---------------------------------------------------------------------------
 [pypi-dependencies]
-torch         = ">=2.5"
-torchvision   = "*"
-torchaudio    = "*"
-marimo        = ">=0.10"
-huggingface-hub = "*"
-datasets      = "*"
-ml3-grade     = { path = "grader", editable = true }
+# ── PyTorch ecosystem ──────────────────────────────────────────────────────
+torch            = ">=2.5"        # ядро; поддерживает torch.compile, FlashAttn 2
+torchvision      = ">=0.20"
+torchaudio       = ">=2.5"
+torchmetrics     = ">=1.4"        # стандартные метрики (Accuracy, F1, BLEU …)
+torchdata        = ">=0.9"        # DataPipes, streaming datasets
+# ── Ускорение и оптимизация ────────────────────────────────────────────────
+einops           = ">=0.8"        # читаемые rearrange/reduce/repeat
+opt-einsum       = "*"            # оптимальное einsum для контракций
+# ── HuggingFace стек ─────────────────────────────────────────────────────
+transformers     = ">=4.48"       # BERT, GPT-2, Llama, ViT, …
+accelerate       = ">=1.3"        # multi-GPU / mixed-precision обёртка
+peft             = ">=0.14"       # LoRA, QLoRA, IA³, Prefix Tuning
+datasets         = ">=3.2"        # стриминг и кэширование датасетов
+tokenizers       = ">=0.21"       # быстрые Rust-токенайзеры
+huggingface-hub  = ">=0.27"       # скачивание моделей и датасетов
+evaluate         = ">=0.4"        # унифицированные метрики HF
+diffusers        = ">=0.32"       # Stable Diffusion, DDPM, DDIM, …
+timm             = ">=1.0"        # 700+ pretrained vision models (ViT, ConvNeXt …)
+sentence-transformers = ">=3.3"   # эмбеддинги предложений, RAG
+# ── Quantization ──────────────────────────────────────────────────────────
+bitsandbytes     = ">=0.45"       # llm.int8(), NF4, QLoRA на GPU
+# ── Эксперименты ──────────────────────────────────────────────────────────
+wandb            = ">=0.18"       # трекинг экспериментов (W&B)
+tensorboard      = ">=2.18"       # альтернативный трекинг
+lightning        = ">=2.5"        # PyTorch Lightning — тренировочный цикл
+# ── Интерактивные ноутбуки ────────────────────────────────────────────────
+marimo           = ">=0.10"       # реактивные ноутбуки (нет hidden state)
+# ── Прочие DL-инструменты ─────────────────────────────────────────────────
+safetensors      = ">=0.4"        # безопасная сериализация весов
+sentencepiece    = "*"            # токенизатор (T5, LLaMA)
+tiktoken         = ">=0.8"        # токенизатор OpenAI / GPT-4
+rich-click       = "*"            # красивые CLI
+# ── Grader (локальный пакет) ───────────────────────────────────────────────
+ml3-grade        = { path = "grader", editable = true }
+
+# ---------------------------------------------------------------------------
+# Опциональные фичи: flash-attn и xformers требуют CUDA ≥ 11.8 и gcc
+# Ставятся вручную после pixi install:
+#   pip install flash-attn --no-build-isolation
+#   pip install xformers
+# ---------------------------------------------------------------------------

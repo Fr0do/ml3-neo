@@ -1,40 +1,429 @@
 ---
-title: "Лекция Generative — Диффузия и Flow Matching"
-subtitle: "От DDPM к современным генеративным моделям"
-author: "ml3-neo"
+title: "Generative Models (углублённо)"
+subtitle: "Optional Track: SDE-диффузия, Flow Matching, Consistency Models, DiT, Video Diffusion"
 date: last-modified
 bibliography: ../../../refs.bib
 format:
   html:
+    toc: true
+    toc-depth: 3
     code-fold: false
 ---
 
 ::: {.callout-note title="Где мы в курсе"}
-Это optional track по Generative ML (advanced). Предполагается понимание базовых генеративных моделей (VAE, GAN) и оптимизации ELBO.
+Это **optional track** по генеративным моделям — углублённый взгляд. Предполагается знакомство с VAE и базовыми диффузионными моделями (DDPM) из основного курса. Трек ~55 минут.
 :::
 
-## 1. DDPM: Denoising Diffusion Probabilistic Models
+## 1. DDPM: быстрое напоминание
 
-Диффузионные модели состоят из двух процессов:
-- **Forward process**: постепенное зашумление данных до чистого гауссовского шума.
-- **Reverse process**: обучаемая нейросеть (обычно U-Net) пытается обратить процесс.
+**Прямой процесс** (forward): постепенно добавляем Гауссов шум за $T$ шагов:
 
-Оптимизируется вариационная нижняя оценка (ELBO), которая сводится к MSE между предсказанным и реальным шумом.
+$$q(\mathbf{x}_t | \mathbf{x}_{t-1}) = \mathcal{N}\!\left(\mathbf{x}_t;\, \sqrt{1-\beta_t}\mathbf{x}_{t-1},\, \beta_t \mathbf{I}\right)$$
 
-## 2. DDIM и ускорение сэмплинга
+Ключевое свойство — можно сразу получить $\mathbf{x}_t$ из $\mathbf{x}_0$:
 
-DDIM (Denoising Diffusion Implicit Models) переформулирует процесс как немарковский, что позволяет делать детерминированный сэмплинг и ускорять генерацию в 10-50 раз за счёт прыжков через шаги.
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t;\, \sqrt{\bar\alpha_t}\,\mathbf{x}_0,\, (1-\bar\alpha_t)\mathbf{I})$$
 
-## 3. Classifier-Free Guidance (CFG)
+где $\bar\alpha_t = \prod_{s=1}^t (1-\beta_s)$.
 
-Метод позволяет совместить условную (conditional) и безусловную (unconditional) генерацию, улучшая соответствие сгенерированных изображений условию.
+**Обратный процесс**: нейросеть $\epsilon_\theta(\mathbf{x}_t, t)$ предсказывает добавленный шум:
 
-## 4. Flow Matching и Latent Diffusion
+$$\mathcal{L} = \mathbb{E}_{t, \mathbf{x}_0, \epsilon}\left[ \left\| \epsilon - \epsilon_\theta\!\left(\sqrt{\bar\alpha_t}\mathbf{x}_0 + \sqrt{1-\bar\alpha_t}\epsilon,\; t\right) \right\|^2 \right]$$
 
-- **Flow Matching**: формулировка через обыкновенные дифференциальные уравнения (ODE). Conditional flow matching часто проще в реализации и стабильнее, чем классическая диффузия.
-- **Latent Diffusion**: перенос диффузионного процесса из пространства пикселей в скрытое пространство (latent space) автоэнкодера (как в Stable Diffusion) для значительного ускорения.
+---
+
+## 2. SDE-формулировка диффузии
+
+Song et al. (2020) показали: прямой и обратный диффузионный процессы можно описать единым языком **стохастических дифференциальных уравнений (SDE)**.
+
+### 2.1 Прямой процесс как SDE (Itô)
+
+$$d\mathbf{x} = \underbrace{f(\mathbf{x}, t)}_{\text{drift}}\,dt + \underbrace{g(t)}_{\text{diffusion}}\,d\mathbf{w}$$
+
+где $\mathbf{w}$ — стандартный броуновский процесс (Винеровский).
+
+Для DDPM (VP-SDE):
+
+$$f(\mathbf{x}, t) = -\frac{1}{2}\beta(t)\mathbf{x}, \qquad g(t) = \sqrt{\beta(t)}$$
+
+Для SMLD/NCSN (VE-SDE):
+
+$$f(\mathbf{x}, t) = 0, \qquad g(t) = \sqrt{\frac{d\sigma^2(t)}{dt}}$$
+
+### 2.2 Обратный процесс: score function
+
+Формула Андерсона (1982): обратный SDE:
+
+$$d\mathbf{x} = \left[f(\mathbf{x}, t) - g(t)^2 \nabla_\mathbf{x} \log p_t(\mathbf{x})\right]dt + g(t)\,d\bar{\mathbf{w}}$$
+
+Ключевое понятие — **score function**: $\nabla_\mathbf{x} \log p_t(\mathbf{x})$.
+
+**Score matching**: учим нейросеть $s_\theta(\mathbf{x}, t) \approx \nabla_\mathbf{x} \log p_t(\mathbf{x})$.
+
+### 2.3 Связь с предсказанием шума
+
+Для VP-SDE предсказание шума и предсказание score связаны:
+
+$$s_\theta(\mathbf{x}_t, t) = -\frac{\epsilon_\theta(\mathbf{x}_t, t)}{\sqrt{1 - \bar\alpha_t}}$$
+
+Поэтому DDPM фактически обучает score function! Просто в другой параметризации.
+
+### 2.4 Probability Flow ODE
+
+Любому SDE соответствует **детерминированное ODE** с теми же маргиналами:
+
+$$d\mathbf{x} = \left[f(\mathbf{x}, t) - \frac{1}{2}g(t)^2 \nabla_\mathbf{x} \log p_t(\mathbf{x})\right]dt$$
+
+Это открывает возможность:
+- Точная инверсия (DDIM inversion) — кодирование реальных изображений в шум
+- Быстрое семплирование ODE-солверами (DPM-Solver, DEIS)
+- Интерполяция в латентном пространстве
+
+---
+
+## 3. Flow Matching
+
+### 3.1 Идея
+
+Flow Matching (Lipman et al. 2022; Liu et al. 2022; Albergo & Vanden-Eijnden 2022) — альтернатива диффузии на основе **normalizing flows**.
+
+Строим непрерывный поток (flow) $\phi_t: \mathbb{R}^d \to \mathbb{R}^d$, отображающий шум $p_1 = \mathcal{N}(0, I)$ в данные $p_0$:
+
+$$\frac{d\mathbf{x}_t}{dt} = v_t(\mathbf{x}_t)$$
+
+Обучаем нейросеть предсказывать **векторное поле** $v_\theta(\mathbf{x}_t, t)$.
+
+### 3.2 Conditional Flow Matching (CFM)
+
+Прямая регрессия на целевое векторное поле неосуществима (неизвестно $v_t$), но можно обусловиться на $\mathbf{x}_0$:
+
+$$\mathcal{L}_\text{CFM} = \mathbb{E}_{t, \mathbf{x}_0, \mathbf{x}_1}\left[ \left\| v_\theta(\mathbf{x}_t, t) - u_t(\mathbf{x}_t | \mathbf{x}_0, \mathbf{x}_1) \right\|^2 \right]$$
+
+где $u_t$ — conditional target vector field.
+
+**Линейный путь** (простейший CFM): интерполируем прямо между $\mathbf{x}_0 \sim p_0$ и $\mathbf{x}_1 \sim \mathcal{N}(0,I)$:
+
+$$\mathbf{x}_t = (1-t)\mathbf{x}_0 + t\mathbf{x}_1, \qquad u_t(\mathbf{x}_t | \mathbf{x}_0, \mathbf{x}_1) = \mathbf{x}_1 - \mathbf{x}_0$$
+
+Целевое поле — константа! Нейросеть учится предсказывать направление от шума к данным.
+
+### 3.3 OT-CFM (Optimal Transport)
+
+Tong et al. (2023). Вместо случайных пар $(\mathbf{x}_0, \mathbf{x}_1)$ используем **оптимальный транспорт** — минибатч OT-план:
+
+$$\pi^* = \arg\min_\pi \mathbb{E}_{(\mathbf{x}_0, \mathbf{x}_1) \sim \pi}\left[ \|\mathbf{x}_0 - \mathbf{x}_1\|^2 \right]$$
+
+Это создаёт более «прямые» траектории → NFE (number of function evaluations) при инференсе меньше → быстрее.
+
+### 3.4 Реализация
+
+```python
+import torch
+import torch.nn as nn
+from torchdiffeq import odeint
+
+class FlowMatchingModel(nn.Module):
+    def __init__(self, d=2, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d + 1, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, d),
+        )
+    def forward(self, t, x):
+        t_emb = t.expand(x.shape[0], 1)
+        return self.net(torch.cat([x, t_emb], dim=-1))
+
+def cfm_loss(model, x0, sigma=0.01):
+    # x0: данные, x1: шум
+    x1 = torch.randn_like(x0)
+    t  = torch.rand(x0.shape[0], 1, device=x0.device)
+    xt = (1 - t) * x0 + t * x1        # интерполяция
+    ut = x1 - x0                       # целевое поле (линейный путь)
+    vt = model(t.squeeze(1), xt)
+    return (vt - ut).pow(2).mean()
+
+# Inference: интегрируем ODE от t=1 (шум) до t=0 (данные)
+model = FlowMatchingModel().cuda()
+x1 = torch.randn(100, 2, device='cuda')
+x0_pred = odeint(lambda t, x: -model(1-t, x), x1,
+                  t=torch.linspace(0, 1, 50, device='cuda'),
+                  method='dopri5')[-1]
+```
+
+### 3.5 Flow Matching vs Diffusion
+
+| Характеристика | Diffusion (DDPM) | Flow Matching |
+|---------------|-----------------|---------------|
+| Пути | Стохастические кривые | Линейные (OT) |
+| NFE для генерации | 50–1000 | 5–20 |
+| Обучение | Шум → score | Поток → vector field |
+| Теоретическая основа | SDE, score matching | ODE, optimal transport |
+
+---
+
+## 4. Consistency Models
+
+### 4.1 Проблема скорости диффузии
+
+Несмотря на DDIM и DPM-Solver, диффузионные модели требуют 20–1000 шагов инференса.
+Можно ли генерировать за **один шаг**?
+
+### 4.2 Consistency Function
+
+Song et al. (2023). Определим **consistency function** $f_\theta(\mathbf{x}_t, t)$ как отображение из любой точки траектории $(\mathbf{x}_t, t)$ напрямую в начало траектории $\mathbf{x}_0$:
+
+$$f_\theta(\mathbf{x}_t, t) \approx \mathbf{x}_0 \quad \forall t$$
+
+**Граничное условие**: $f_\theta(\mathbf{x}_0, 0) = \mathbf{x}_0$ (тождество при $t=0$).
+
+**Свойство самосогласованности**: точки на одной PF-ODE траектории должны давать один ответ:
+
+$$f_\theta(\mathbf{x}_t, t) = f_\theta(\mathbf{x}_{t'}, t'), \quad \text{для } \mathbf{x}_t, \mathbf{x}_{t'} \text{ на одной траектории}$$
+
+### 4.3 Consistency Distillation (CD)
+
+Используем предобученную диффузионную модель (учитель). На каждом шаге обучения:
+
+1. Семплируем $\mathbf{x}_t$, делаем один шаг ODE: $\hat{\mathbf{x}}_{t_{n-1}} \approx \mathbf{x}_{t_{n-1}}$
+2. Loss: близость предсказаний в соседних точках траектории:
+
+$$\mathcal{L}_\text{CD} = d\!\left(f_\theta(\mathbf{x}_{t_n}, t_n),\; f_{\theta^-}(\hat{\mathbf{x}}_{t_{n-1}}, t_{n-1})\right)$$
+
+где $\theta^-$ — exponential moving average (EMA) весов, $d$ — метрика (LPIPS, L2).
+
+### 4.4 Consistency Training (CT)
+
+Без учителя — consistency напрямую через оценку score function:
+
+$$\mathcal{L}_\text{CT} = d\!\left(f_\theta(\mathbf{x}_{t_{n+1}}, t_{n+1}),\; f_{\theta^-}(\mathbf{x}_{t_n}^{\phi}, t_n)\right)$$
+
+где $\mathbf{x}_{t_n}^{\phi}$ — следующая точка от ODE с текущей score-оценкой.
+
+**Результат**: 1-2 NFE вместо 100+, качество близко к диффузионным моделям.
+
+---
+
+## 5. DiT: Diffusion Transformer
+
+### 5.1 Мотивация
+
+Традиционная диффузия использует U-Net как backbone. DiT (Peebles & Xie, 2022) спрашивает: а можно ли заменить U-Net на **Vision Transformer**?
+
+**Ответ**: да, и это масштабируется значительно лучше.
+
+### 5.2 Архитектура
+
+**Входной пайплайн:**
+
+1. VAE-энкодер сжимает изображение $256 \times 256 \to 32 \times 32 \times 4$ (латент)
+2. **Patch embedding**: разбиваем латент на патчи $2 \times 2$, линейно проецируем → последовательность токенов
+3. Добавляем learnable positional embedding
+
+```
+Latent 32×32×4  →  Patches 16×16×(4·4)  →  Linear  →  256 tokens × 1152d
+```
+
+**DiT Block:**
+
+$$\mathbf{z} = \mathbf{z} + \text{Attention}(\text{LN}_1(\mathbf{z}))$$
+$$\mathbf{z} = \mathbf{z} + \text{MLP}(\text{LN}_2(\mathbf{z}))$$
+
+Но с **адаптивным layer norm (adaLN)**:
+
+$$\text{adaLN}(\mathbf{z}, c) = (1 + \alpha_c) \cdot \text{LN}(\mathbf{z}) + \beta_c$$
+
+где $\alpha_c, \beta_c$ предсказываются из условия $c$ (timestep + class embedding) через MLP.
+
+**Декодирование**: линейный слой → деновойзинг на латенте → VAE-декодер.
+
+### 5.3 Конфигурации и масштабирование
+
+| Модель | Параметры | GFLOPs | FID |
+|--------|-----------|--------|-----|
+| DiT-S/2 | 33M | 6 | 68.4 |
+| DiT-B/2 | 130M | 23 | 43.5 |
+| DiT-L/2 | 458M | 80 | 23.3 |
+| DiT-XL/2 | 675M | 119 | 2.27 |
+
+FID масштабируется как степенная функция от числа FLOP — классические scaling laws для генеративных моделей.
+
+### 5.4 Примеры использования
+
+```python
+# DiT через diffusers (SD3, Flux используют DiT-подобную архитектуру)
+from diffusers import StableDiffusion3Pipeline
+import torch
+
+pipe = StableDiffusion3Pipeline.from_pretrained(
+    "stabilityai/stable-diffusion-3-medium-diffusers",
+    torch_dtype=torch.float16,
+)
+pipe = pipe.to("cuda")
+
+image = pipe(
+    "A photorealistic cat sitting on a keyboard",
+    num_inference_steps=28,
+    guidance_scale=7.0,
+).images[0]
+```
+
+---
+
+## 6. Video Diffusion
+
+### 6.1 От картинок к видео
+
+Видео = последовательность кадров. Главные вызовы:
+
+- **Пространственно-временная когерентность**: кадры должны быть связны во времени
+- **Размерность**: видео 64 кадра × 256× 256 = 4M пикселей на семпл
+- **Движение**: объекты движутся — нужна модель динамики
+
+### 6.2 3D U-Net
+
+Первые video diffusion модели (Ho et al., 2022) расширяют 2D U-Net добавлением **временного измерения**:
+
+- **3D свёртки**: $k \times k \times k$ вместо $k \times k$ (пространство + время)
+- **Spatial-temporal attention**: внимание и по пространству, и по времени
+- **Factored attention**: сначала spatial attention, потом temporal attention — дешевле
+
+```python
+import torch, torch.nn as nn
+
+class SpatioTemporalAttention(nn.Module):
+    """Разделённое пространственно-временное внимание"""
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.spatial_attn  = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.temporal_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+
+    def forward(self, x):
+        B, T, H, W, C = x.shape
+        # Spatial: для каждого кадра отдельно
+        x_s = x.view(B*T, H*W, C)
+        x_s, _ = self.spatial_attn(x_s, x_s, x_s)
+        x = x_s.view(B, T, H, W, C)
+        # Temporal: для каждого пикселя по времени
+        x_t = x.permute(0,2,3,1,4).reshape(B*H*W, T, C)
+        x_t, _ = self.temporal_attn(x_t, x_t, x_t)
+        x = x_t.view(B, H, W, T, C).permute(0,3,1,2,4)
+        return x
+```
+
+### 6.3 Latent Video Diffusion
+
+На уровне пикселей видео — слишком дорого. Современные модели (Stable Video Diffusion, AnimateDiff) работают в **латентном пространстве**:
+
+1. 2D VAE кодирует каждый кадр в латент (пространственное сжатие)
+2. Video Diffusion работает в пространстве последовательности латентов
+3. 2D VAE декодирует латенты обратно в кадры
+
+### 6.4 Sora: концептуально
+
+OpenAI Sora (2024) — DiT архитектура для видео:
+
+- **Video patches (spacetime patches)**: пространственно-временные патчи из видеолатента
+- **Variable duration/resolution**: единый DiT работает с видео разных длительностей и разрешений (из-за чего размер последовательности токенов меняется)
+- **Recaptioning**: видео синхронно перезаписываются с детальными текстовыми описаниями для лучшего text-video alignment
+- Масштаб: обучение на сотнях видеочасов, сотни миллиардов токенов
+
+---
+
+## 7. Практика: diffusers library
+
+### 7.1 Базовый inference pipeline
+
+```python
+from diffusers import (
+    StableDiffusionPipeline,
+    DDIMScheduler,
+    DPMSolverMultistepScheduler,
+)
+import torch
+
+# Загрузка модели
+pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    torch_dtype=torch.float16,
+)
+pipe = pipe.to("cuda")
+
+# Быстрый scheduler (20 шагов вместо 50)
+pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+
+image = pipe(
+    prompt="A futuristic city at night, cyberpunk style",
+    negative_prompt="blurry, low quality",
+    num_inference_steps=20,
+    guidance_scale=7.5,
+    generator=torch.Generator("cuda").manual_seed(42),
+).images[0]
+```
+
+### 7.2 Кастомный training loop (DDPM)
+
+```python
+from diffusers import UNet2DModel, DDPMScheduler
+import torch, torch.nn.functional as F
+
+unet = UNet2DModel(
+    sample_size=64, in_channels=3, out_channels=3,
+    layers_per_block=2,
+    block_out_channels=(128, 128, 256, 256),
+    down_block_types=("DownBlock2D","DownBlock2D","AttnDownBlock2D","DownBlock2D"),
+    up_block_types  =("UpBlock2D","AttnUpBlock2D","UpBlock2D","UpBlock2D"),
+)
+scheduler = DDPMScheduler(num_train_timesteps=1000)
+
+optimizer = torch.optim.AdamW(unet.parameters(), lr=1e-4)
+
+for epoch in range(num_epochs):
+    for clean_images in dataloader:
+        # Семплируем случайные timesteps
+        t = torch.randint(0, 1000, (clean_images.shape[0],), device=clean_images.device)
+        noise = torch.randn_like(clean_images)
+
+        # Зашумляем изображения
+        noisy = scheduler.add_noise(clean_images, noise, t)
+
+        # Предсказываем шум
+        pred_noise = unet(noisy, t).sample
+
+        loss = F.mse_loss(pred_noise, noise)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### 7.3 Classifier-Free Guidance (CFG)
+
+```python
+# При inference: смешиваем conditional и unconditional предсказания
+guidance_scale = 7.5
+
+with torch.no_grad():
+    # Batched: половина с промптом, половина с пустым
+    noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+# CFG: двигаемся сильнее в направлении условной генерации
+noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+```
+
+---
+
+## Итоги
+
+1. **SDE-формулировка**: объединяет DDPM (VP-SDE) и SMLD (VE-SDE); score function = -εθ/√(1-ᾱ); PF-ODE позволяет инверсию
+2. **Flow Matching**: прямолинейные OT-пути между данными и шумом; предсказываем vector field; 5–20 NFE vs 100+ у диффузии
+3. **Consistency Models**: одношаговая генерация через обучение self-consistency property; CD от учителя, CT без учителя
+4. **DiT**: патчевый Vision Transformer вместо U-Net в латентном пространстве; масштабируется как MLP по FLOP
+5. **Video Diffusion**: 3D U-Net или DiT с spacetime patches; factored spatial/temporal attention; Sora = DiT на video tokens
+
+---
 
 ::: {.callout-tip title="Связь с семинаром и ДЗ"}
-- **Семинар**: [advanced](../../../seminars/tracks/generative/advanced.html) — DDPM с нуля на MNIST.
-- **ДЗ**: [generative](../../../homework/tracks/generative/README.qmd) — conditional diffusion model с CFG.
+- **Семинар** ([advanced](../../../seminars/tracks/generative/advanced.html)): реализация DDPM с нуля на MNIST; демонстрация CFG и DDIM inversion.
+- **ДЗ**: [generative](../../../homework/tracks/generative/README.qmd) — conditional diffusion model с CFG на датасете изображений, эксперименты с schedulers и guidance scale.
 :::

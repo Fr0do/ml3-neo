@@ -19,8 +19,8 @@ project:
 website:
   title: "ML3 Neo"
   description: "Курс машинного обучения для магистратур по data science"
-  site-url: https://ml3-neo.example.org
-  repo-url: https://github.com/example/ml3-neo
+  site-url: https://fr0do.github.io/ml3-neo
+  repo-url: https://github.com/Fr0do/ml3-neo
   repo-actions: [edit, source, issue]
   page-navigation: true
   search:
@@ -81,7 +81,7 @@ website:
         text: Leaderboards
     right:
       - icon: github
-        href: https://github.com/example/ml3-neo
+        href: https://github.com/Fr0do/ml3-neo
         aria-label: GitHub
   sidebar:
     - id: course
