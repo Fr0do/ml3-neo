@@ -1,0 +1,68 @@
+{
+  "task": "document_classification",
+  "num_classes": 3,
+  "vocab_size": 128,
+  "image_shape": [
+    1,
+    32,
+    32
+  ],
+  "pattern_positions": {
+    "0": {
+      "rows": [
+        0,
+        1
+      ],
+      "cols": [
+        26,
+        22,
+        19,
+        12
+      ],
+      "tokens": [
+        125,
+        11,
+        54,
+        109
+      ]
+    },
+    "1": {
+      "rows": [
+        19,
+        20
+      ],
+      "cols": [
+        26,
+        22,
+        19,
+        12
+      ],
+      "tokens": [
+        65,
+        122,
+        97,
+        93
+      ]
+    },
+    "2": {
+      "rows": [
+        27,
+        28
+      ],
+      "cols": [
+        26,
+        22,
+        19,
+        12
+      ],
+      "tokens": [
+        57,
+        64,
+        16,
+        105
+      ]
+    }
+  },
+  "note": "Synthetic data for debugging. Documents with positional class patterns.",
+  "seed": 42
+}

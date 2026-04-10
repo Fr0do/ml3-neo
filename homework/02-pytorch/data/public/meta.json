@@ -1,0 +1,11 @@
+{
+  "task": "mnist_style_classification",
+  "num_classes": 10,
+  "image_shape": [
+    1,
+    28,
+    28
+  ],
+  "note": "Synthetic data for debugging. NOT real MNIST.",
+  "seed": 42
+}

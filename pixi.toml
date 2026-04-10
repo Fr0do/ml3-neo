@@ -21,6 +21,7 @@ grade            = { cmd = "ml3 grade both $HW", env = { HW = "04-cnn-zoo" } }
 tikz             = "python figures/render.py"
 tikz-all         = "python figures/render.py --all"
 export-seminars  = "python scripts/export_seminars.py"
+gen-data         = "python scripts/generate_dev_data.py"
 test             = "pytest grader/tests"
 # Проверка флэш-аттеншн и окружения GPU
 check-env        = "python -c \"import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}, devices={torch.cuda.device_count()}')\""

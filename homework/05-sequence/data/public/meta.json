@@ -1,0 +1,67 @@
+{
+  "task": "sequence_classification",
+  "num_classes": 5,
+  "vocab_size": 64,
+  "seq_len": 64,
+  "image_shape": [
+    1,
+    64,
+    64
+  ],
+  "key_tokens": [
+    [
+      41,
+      5,
+      48
+    ],
+    [
+      5,
+      44,
+      53
+    ],
+    [
+      32,
+      61,
+      47
+    ],
+    [
+      32,
+      48,
+      8
+    ],
+    [
+      31,
+      23,
+      11
+    ]
+  ],
+  "key_positions": [
+    [
+      52,
+      39,
+      25
+    ],
+    [
+      27,
+      5,
+      14
+    ],
+    [
+      52,
+      54,
+      3
+    ],
+    [
+      44,
+      10,
+      47
+    ],
+    [
+      60,
+      28,
+      57
+    ]
+  ],
+  "note": "Synthetic data for debugging. Token sequences with class-specific key tokens.",
+  "seed": 42
+}
