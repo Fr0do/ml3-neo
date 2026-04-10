@@ -14,7 +14,11 @@ TODO: где этот модуль в общей схеме, что предпо
 :::
 
 ::: {.level-toggle}
-[basic](../../seminars/<id>/basic.html){.active} · [advanced](../../seminars/<id>/advanced.html)
+[basic](https://github.com/Fr0do/ml3-neo/blob/main/seminars/<id>/basic.py){target="_blank"} · [advanced](https://github.com/Fr0do/ml3-neo/blob/main/seminars/<id>/advanced.py){target="_blank"}
+:::
+
+::: {.callout-tip title="Открыть семинар локально"}
+`pixi run seminar MODULE=<id> LEVEL=basic`
 :::
 
 ## 1. Мотивация

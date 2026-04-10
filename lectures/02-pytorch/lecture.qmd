@@ -16,7 +16,11 @@ format:
 :::
 
 ::: {.level-toggle}
-[basic](../../seminars/02-pytorch/basic.html){.active} · [advanced](../../seminars/02-pytorch/advanced.html)
+[basic](https://github.com/Fr0do/ml3-neo/blob/main/seminars/02-pytorch/basic.py){target="_blank"} · [advanced](https://github.com/Fr0do/ml3-neo/blob/main/seminars/02-pytorch/advanced.py){target="_blank"}
+:::
+
+::: {.callout-tip title="Открыть семинар локально"}
+`pixi run seminar MODULE=02-pytorch LEVEL=basic`
 :::
 
 ---

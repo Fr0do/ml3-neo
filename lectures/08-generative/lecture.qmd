@@ -14,7 +14,11 @@ format:
 :::
 
 ::: {.level-toggle}
-[basic](../../seminars/08-generative/basic.html){.active} · [advanced](../../seminars/08-generative/advanced.html)
+[basic](https://github.com/Fr0do/ml3-neo/blob/main/seminars/08-generative/basic.py){target="_blank"} · [advanced](https://github.com/Fr0do/ml3-neo/blob/main/seminars/08-generative/advanced.py){target="_blank"}
+:::
+
+::: {.callout-tip title="Открыть семинар локально"}
+`pixi run seminar MODULE=08-generative LEVEL=basic`
 :::
 
 ---

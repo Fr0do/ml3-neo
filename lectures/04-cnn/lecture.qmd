@@ -16,7 +16,11 @@ format:
 :::
 
 ::: {.level-toggle}
-[basic](../../seminars/04-cnn/basic.html){.active} · [advanced](../../seminars/04-cnn/advanced.html)
+[basic](https://github.com/Fr0do/ml3-neo/blob/main/seminars/04-cnn/basic.py){target="_blank"} · [advanced](https://github.com/Fr0do/ml3-neo/blob/main/seminars/04-cnn/advanced.py){target="_blank"}
+:::
+
+::: {.callout-tip title="Открыть семинар локально"}
+`pixi run seminar MODULE=04-cnn LEVEL=basic`
 :::
 
 ---

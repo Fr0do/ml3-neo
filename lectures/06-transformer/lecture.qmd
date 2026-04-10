@@ -16,7 +16,11 @@ format:
 :::
 
 ::: {.level-toggle}
-[basic](../../seminars/06-transformer/basic.html){.active} · [advanced](../../seminars/06-transformer/advanced.html)
+[basic](https://github.com/Fr0do/ml3-neo/blob/main/seminars/06-transformer/basic.py){target="_blank"} · [advanced](https://github.com/Fr0do/ml3-neo/blob/main/seminars/06-transformer/advanced.py){target="_blank"}
+:::
+
+::: {.callout-tip title="Открыть семинар локально"}
+`pixi run seminar MODULE=06-transformer LEVEL=basic`
 :::
 
 ---
